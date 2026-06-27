@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments (your project's virtualenv)
+backend/main/
+.venv/
+venv/
+env/
+
+# Local configuration / secrets
+backend/.env
+.env
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+
+# OS metadata
+Thumbs.db
+.DS_Store
