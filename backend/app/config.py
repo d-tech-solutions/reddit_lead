@@ -5,6 +5,9 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     MONITORED_SUBREDDITS: str = "startups,smallbusiness,entrepreneur,SaaS,forhire"
     POLL_INTERVAL_SECONDS: int = 300
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_MODEL: str = "meta-llama/llama-3-8b-instruct:free"
+
 
     class Config:
         env_file = ".env"
