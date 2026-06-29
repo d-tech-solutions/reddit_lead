@@ -79,21 +79,20 @@ def analyze_post(title: str, content: str, search_intent_profile: dict = None) -
         "2. Make sure the post does NOT contain any elements matching the user's excluded opportunities (e.g. homework, tutorials, standard job ads).\n"
         "3. Look for buying intent, authority signals (e.g., founder, owner), and solveable business problems.\n"
         "4. Calculate a match confidence score (0-100).\n"
-        "5. Formulate a list of 2-4 structured reasons for the 'match_reasoning' field starting with a checkmark symbol (e.g., '✓ Matches your preferred opportunity: Business Automation').\n"
-        "6. Estimate the project value based on content cues (e.g., '$5k-$10k', 'Under $1k', '$10k+', 'Unspecified').\n"
-        "7. Draft a suggested reply pitch that addresses their specific problem conversational and naturally without sounding like generic AI boilerplate.\n\n"
-        "Output EXACTLY this JSON structure:\n"
+        "You are an expert sales lead analyzer for freelance developers, AI consultants, and digital agencies.\n"
+        "Your task is to analyze a Reddit post and output a JSON object to qualify it as a potential business lead for the user.\n\n"
+        "Evaluate the post and output EXACTLY this JSON structure:\n"
         "{\n"
-        '  "relevant": <boolean indicating if this is a qualified match for the user>,\n'
-        '  "score": <0-100 integer representing match quality and buying intent. 70+ indicates strong buying intent>,\n'
+        '  "relevant": <boolean indicating if this is a qualified match for the user\'s preferences>,\n'
+        '  "score": <0-100 integer representing match quality and buying intent. 70+ indicates a strong lead>,\n'
         '  "industry": "<e.g., E-commerce, Restaurant, Finance, Healthcare, Real Estate, or General if unknown>",\n'
         '  "urgency": "<Low, Medium, or High>",\n'
         '  "intent": "<brief description of what they need, e.g., CRM setup, landing page, custom SaaS, etc.>",\n'
-        '  "estimated_budget": "<project value range, e.g., \'$5k-$10k\', \'Unspecified\'>",\n'
-        '  "recommended_service": "<recommended service from user profile, e.g., Web Development>",\n'
-        '  "summary": "<1-2 sentence business-focused summary of the post requirements>",\n'
-        '  "suggested_reply": "<a highly customized, friendly, professional pitch reply tailored to the post. Make it ready to send on Reddit. Do not mention you are an AI or bot.>",\n'
-        '  "match_reasoning": [<list of strings explaining why this post matched the profile using checkmark prefixes>]\n'
+        '  "estimated_budget": "<brief mention of budget, e.g., \'$5000\', \'Unspecified\', \'Under $1000\'>",\n'
+        '  "recommended_service": "<the service we should offer matching the user\'s capabilities, e.g., Web Development, AI Integration, Flutter App>",\n'
+        '  "summary": "<1-2 sentence summary of the project and user requirements>",\n'
+        '  "match_reasoning": [<list of strings detailing exactly why this post fits or does not fit user preferences>],\n'
+        '  "suggested_reply": "<a highly customized, friendly, professional pitch reply addressing their specific problem and showcasing value. Keep it natural, conversational, and avoid sounding like generic ChatGPT boilerplate. Make it ready to send on Reddit. Do not mention that you are an AI or bot.>"\n'
         "}\n\n"
         "Output ONLY the raw JSON object. Do not wrap it in markdown block characters."
     )

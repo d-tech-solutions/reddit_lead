@@ -8,46 +8,48 @@ from app.notifier import send_lead_notification
 
 logger = logging.getLogger(__name__)
 
-def analyze_pending_posts(db: Session, limit: int = 10) -> dict:
-    """Find Reddit posts without analysis, qualify them against the search intent profile, and store them."""
-    # Retrieve user search intent profile
-    prefs = db.query(UserPreferences).filter(UserPreferences.user_id == 1).first()
+def analyze_pending_posts(db: Session, user_id: int, limit: int = 10) -> dict:
+    from app.models import UserPreferences
     
+    # Retrieve user intent profile
+    prefs = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
     if not prefs or prefs.onboarding_status != "completed" or not prefs.profile_json:
-        logger.warning("No completed search intent profile found for user 1. Skipping analysis.")
-        return {
-            "processed": 0,
-            "successful": 0,
-            "warning": "Search intent profile is not yet set up. Please complete setup in Settings/Dashboard."
-        }
+        logger.warning(f"User ID={user_id} has not completed onboarding. Skipping analysis.")
+        return {"processed": 0, "successful": 0}
         
-    profile = prefs.profile_json
+    search_intent_profile = prefs.profile_json
 
-    # Find posts that do not have an associated LeadAnalysis entry
+    # Find posts that do not have an associated LeadAnalysis entry for this specific user
+    # Using an outer join to identify posts where LeadAnalysis.id is NULL for this user
     pending_posts = (
         db.query(RedditPost)
-        .outerjoin(LeadAnalysis)
+        .outerjoin(
+            LeadAnalysis, 
+            (LeadAnalysis.post_id == RedditPost.id) & (LeadAnalysis.user_id == user_id)
+        )
         .filter(LeadAnalysis.id == None)
+        .order_by(RedditPost.created_utc.desc())
         .limit(limit)
         .all()
     )
     
     total_found = len(pending_posts)
     if total_found == 0:
-        logger.info("No pending Reddit posts found for AI analysis.")
+        logger.info(f"No pending Reddit posts found for AI analysis for user ID={user_id}.")
         return {"processed": 0, "successful": 0}
         
-    logger.info(f"Found {total_found} pending posts to analyze (limit={limit}) using profile. Starting analysis...")
+    logger.info(f"Found {total_found} pending posts to analyze for user ID={user_id} (limit={limit}). Starting analysis...")
     
     successful_count = 0
     for post in pending_posts:
         try:
-            logger.info(f"Analyzing post ID={post.id} (reddit_id={post.reddit_id}) title='{post.title[:30]}...'")
-            analysis_result = analyze_post(post.title, post.content, search_intent_profile=profile)
+            logger.info(f"Analyzing post ID={post.id} (reddit_id={post.reddit_id}) title='{post.title[:30]}...' for user ID={user_id}")
+            analysis_result = analyze_post(post.title, post.content, search_intent_profile=search_intent_profile)
             
-            # Persist the analysis
+            # Persist the user-specific analysis
             db_analysis = LeadAnalysis(
                 post_id=post.id,
+                user_id=user_id,
                 relevant=analysis_result.get("relevant", False),
                 score=analysis_result.get("score", 0),
                 industry=analysis_result.get("industry", "General"),
@@ -63,7 +65,7 @@ def analyze_pending_posts(db: Session, limit: int = 10) -> dict:
             db.commit()
             successful_count += 1
             
-            # Send notification if the lead is relevant and score matches or exceeds threshold
+            # Send notification if score matches or exceeds configured threshold and is relevant
             if db_analysis.relevant and db_analysis.score >= settings.MIN_NOTIFICATION_SCORE:
                 try:
                     send_lead_notification(
@@ -84,9 +86,9 @@ def analyze_pending_posts(db: Session, limit: int = 10) -> dict:
             
         except Exception as e:
             db.rollback()
-            logger.error(f"Error during AI analysis for post ID={post.id}: {e}", exc_info=True)
+            logger.error(f"Error during AI analysis for post ID={post.id} and user ID={user_id}: {e}", exc_info=True)
             
-    logger.info(f"Analysis complete. Processed {total_found} posts, successfully scored and saved {successful_count} leads.")
+    logger.info(f"Analysis complete. Processed {total_found} posts, successfully scored and saved {successful_count} leads for user ID={user_id}.")
     return {
         "processed": total_found,
         "successful": successful_count

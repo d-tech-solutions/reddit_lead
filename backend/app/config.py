@@ -11,7 +11,12 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str = ""
     MIN_NOTIFICATION_SCORE: int = 70
 
-
+    # Authentication Settings
+    SECRET_KEY: str = "leadradar_secret_key_super_secure_987654321"
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/auth/google/callback"
+    FRONTEND_URL: str = "http://localhost:3000"
 
     class Config:
         env_file = ".env"
