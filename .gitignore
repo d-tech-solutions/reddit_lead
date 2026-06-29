@@ -20,3 +20,26 @@ backend/.env
 # OS metadata
 Thumbs.db
 .DS_Store
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python Test & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Frontend Build & Cache
+node_modules/
+.next/
+out/
+build/
+dist/
+.vercel
+.eslintcache
+.npm/
+
+# Local Frontend Environment
+frontend/.env*.local
