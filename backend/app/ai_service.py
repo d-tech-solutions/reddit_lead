@@ -20,6 +20,7 @@ def clean_json_output(text: str) -> dict:
         logger.error(f"Failed to parse LLM response as JSON. Error: {e}. Raw response: {text}")
         # Return a safe fallback structure
         return {
+            "relevant": False,
             "score": 0,
             "industry": "General",
             "urgency": "Low",
@@ -27,51 +28,72 @@ def clean_json_output(text: str) -> dict:
             "estimated_budget": "Unspecified",
             "recommended_service": "General Development",
             "summary": "Failed to analyze post content.",
-            "suggested_reply": "Hi! I noticed your post and would love to discuss how I can help with your project."
+            "suggested_reply": "Hi! I noticed your post and would love to discuss how I can help with your project.",
+            "match_reasoning": []
         }
 
-def analyze_post(title: str, content: str) -> dict:
-    """Call OpenRouter completions API to analyze a Reddit post's lead quality."""
-    if not settings.OPENROUTER_API_KEY or settings.OPENROUTER_API_KEY == "your_openrouter_api_key_here":
-        logger.warning("OpenRouter API key is not configured. Returning mock analysis.")
+def analyze_post(title: str, content: str, search_intent_profile: dict = None) -> dict:
+    """Call OpenAI completions API to analyze a Reddit post against the user's Search Intent Profile."""
+    
+    # Default search intent profile if none is provided
+    if not search_intent_profile:
+        search_intent_profile = {
+            "services": ["Web Development", "Mobile App Development", "SaaS MVPs", "AI Consulting", "Workflow Automation"],
+            "desired_opportunities": ["startups needing developers", "business owners looking for software development", "automation projects"],
+            "target_businesses": ["startups", "small business owners"],
+            "preferred_industries": [],
+            "excluded_opportunities": ["job posts", "homework", "tutorials", "full-time employment"]
+        }
+
+    if not settings.OPENAI_API_KEY or settings.OPENAI_API_KEY == "your_openai_api_key_here":
+        logger.warning("OpenAI API key is not configured. Returning mock analysis.")
         return {
-            "score": 50,
+            "relevant": True,
+            "score": 85,
             "industry": "Software",
             "urgency": "Medium",
-            "intent": "General inquiry",
-            "estimated_budget": "Unspecified",
-            "recommended_service": "Consulting",
-            "summary": "Mock summary (API Key missing).",
-            "suggested_reply": "Hi! I saw your post. Feel free to reach out to discuss details."
+            "intent": "SaaS MVP Development",
+            "estimated_budget": "$5k-$10k",
+            "recommended_service": "Web Development",
+            "summary": "Mock summary: User is looking to build a custom application (API Key missing).",
+            "suggested_reply": "Hi! I saw your post. I build custom web applications and SaaS MVPs. Let me know if you would like to discuss this further.",
+            "match_reasoning": [
+                "Matches your preferred opportunity: SaaS MVP Development (Mock Mode)",
+                "Startup founder detected (Mock Mode)"
+            ]
         }
 
-    url = "https://openrouter.ai/api/v1/chat/completions"
+    url = "https://api.openai.com/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/dharanidharan/reddit-lead",
-        "X-Title": "LeadRadar AI"
+        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+        "Content-Type": "application/json"
     }
 
     system_prompt = (
-        "You are an expert sales lead analyzer for freelance developers, AI consultants, and digital agencies.\n"
-        "Your task is to analyze a Reddit post and output a JSON object to qualify it as a potential business lead.\n\n"
-        "Target client services include:\n"
-        "- Web Development (e.g. React, Next.js, Laravel, custom websites)\n"
-        "- Mobile App Development (e.g. Flutter, iOS, Android)\n"
-        "- SaaS MVP development\n"
-        "- AI Consulting & Custom AI Integrations\n"
-        "- Workflow Automation\n\n"
-        "Evaluate the post and output EXACTLY this JSON structure:\n"
+        "You are the Search Intent Engine and Lead Intelligence Engine for LeadRadar AI, an AI-powered Lead Intelligence Platform.\n"
+        "Your task is to evaluate a Reddit post against a user's Search Intent Profile and decide if it is a relevant opportunity.\n\n"
+        "=== USER SEARCH INTENT PROFILE ===\n"
+        f"{json.dumps(search_intent_profile, indent=2)}\n\n"
+        "=== GUIDELINES ===\n"
+        "1. Determine if the post matches the user's services and desired opportunities.\n"
+        "2. Make sure the post does NOT contain any elements matching the user's excluded opportunities (e.g. homework, tutorials, standard job ads).\n"
+        "3. Look for buying intent, authority signals (e.g., founder, owner), and solveable business problems.\n"
+        "4. Calculate a match confidence score (0-100).\n"
+        "5. Formulate a list of 2-4 structured reasons for the 'match_reasoning' field starting with a checkmark symbol (e.g., '✓ Matches your preferred opportunity: Business Automation').\n"
+        "6. Estimate the project value based on content cues (e.g., '$5k-$10k', 'Under $1k', '$10k+', 'Unspecified').\n"
+        "7. Draft a suggested reply pitch that addresses their specific problem conversational and naturally without sounding like generic AI boilerplate.\n\n"
+        "Output EXACTLY this JSON structure:\n"
         "{\n"
-        '  "score": <0-100 integer representing lead quality/buying intent. 70+ indicates a strong lead needing a developer/agency>,\n'
+        '  "relevant": <boolean indicating if this is a qualified match for the user>,\n'
+        '  "score": <0-100 integer representing match quality and buying intent. 70+ indicates strong buying intent>,\n'
         '  "industry": "<e.g., E-commerce, Restaurant, Finance, Healthcare, Real Estate, or General if unknown>",\n'
         '  "urgency": "<Low, Medium, or High>",\n'
         '  "intent": "<brief description of what they need, e.g., CRM setup, landing page, custom SaaS, etc.>",\n'
-        '  "estimated_budget": "<brief mention of budget, e.g., \'$5000\', \'Unspecified\', \'Under $1000\'>",\n'
-        '  "recommended_service": "<the service we should offer, e.g., Web Development, AI Integration, Flutter App>",\n'
-        '  "summary": "<1-2 sentence summary of the project and user requirements>",\n'
-        '  "suggested_reply": "<a highly customized, friendly, professional pitch reply addressing their specific problem and showcasing value. Keep it natural, conversational, and avoid sounding like generic ChatGPT boilerplate. Make it ready to send on Reddit. Do not mention that you are an AI or bot.>"\n'
+        '  "estimated_budget": "<project value range, e.g., \'$5k-$10k\', \'Unspecified\'>",\n'
+        '  "recommended_service": "<recommended service from user profile, e.g., Web Development>",\n'
+        '  "summary": "<1-2 sentence business-focused summary of the post requirements>",\n'
+        '  "suggested_reply": "<a highly customized, friendly, professional pitch reply tailored to the post. Make it ready to send on Reddit. Do not mention you are an AI or bot.>",\n'
+        '  "match_reasoning": [<list of strings explaining why this post matched the profile using checkmark prefixes>]\n'
         "}\n\n"
         "Output ONLY the raw JSON object. Do not wrap it in markdown block characters."
     )
@@ -79,27 +101,27 @@ def analyze_post(title: str, content: str) -> dict:
     user_content = f"Title: {title}\n\nContent: {content or '[No Content]'}"
 
     payload = {
-        "model": settings.OPENROUTER_MODEL,
+        "model": settings.OPENAI_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content}
         ],
-        "temperature": 0.2
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"}
     }
 
     try:
-        logger.info(f"Sending request to OpenRouter using model: {settings.OPENROUTER_MODEL}")
+        logger.info(f"Sending request to OpenAI using model: {settings.OPENAI_MODEL}")
         response = httpx.post(url, headers=headers, json=payload, timeout=20.0)
         response.raise_for_status()
         
         result_data = response.json()
         choices = result_data.get("choices", [])
         if not choices:
-            logger.error("No completion choices returned from OpenRouter.")
-            return clean_json_output("")
+            raise Exception("No completion choices returned from OpenAI.")
             
         content_out = choices[0].get("message", {}).get("content", "")
         return clean_json_output(content_out)
     except Exception as e:
-        logger.error(f"OpenRouter API request failed: {e}", exc_info=True)
-        return clean_json_output("")
+        logger.error(f"OpenAI API request failed: {e}", exc_info=True)
+        raise e
