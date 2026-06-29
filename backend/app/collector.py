@@ -4,7 +4,7 @@ import xml.etree.ElementTree as ET
 import httpx
 from sqlalchemy.orm import Session
 from app.config import settings
-from app.models import RedditPost
+from app import crud
 
 
 logger = logging.getLogger(__name__)
@@ -95,18 +95,10 @@ def collect_leads(db: Session) -> dict:
         
         for post in posts:
             # Check if post already exists in the database
-            exists = db.query(RedditPost).filter(RedditPost.reddit_id == post["reddit_id"]).first()
+            exists = crud.get_post_by_reddit_id(db, reddit_id=post["reddit_id"])
             if not exists:
-                db_post = RedditPost(
-                    reddit_id=post["reddit_id"],
-                    title=post["title"],
-                    content=post["content"],
-                    author=post["author"],
-                    subreddit=post["subreddit"],
-                    url=post["url"],
-                    created_utc=post["created_utc"]
-                )
-                db.add(db_post)
+                crud.create_reddit_post(db, post)
+
                 total_saved += 1
         
         try:

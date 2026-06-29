@@ -3,14 +3,14 @@ import logging
 import httpx
 from sqlalchemy.orm import Session
 from app.config import settings
-from app.models import UserPreferences
+from app import crud
 
 logger = logging.getLogger(__name__)
 
 def initialize_onboarding(db: Session, user_id: int = 1) -> str:
     """Initialize or reset the conversational onboarding flow for a user."""
     # Find or create UserPreferences
-    prefs = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
+    prefs = crud.get_user_preferences(db, user_id=user_id)
     
     first_question = "What kinds of opportunities would you like me to notify you about?"
     
@@ -19,15 +19,7 @@ def initialize_onboarding(db: Session, user_id: int = 1) -> str:
     ]
     
     if not prefs:
-        prefs = UserPreferences(
-            user_id=user_id,
-            onboarding_status="in_progress",
-            onboarding_history=initial_history,
-            question_count=1,
-            confidence=0.0,
-            profile_json=None
-        )
-        db.add(prefs)
+        prefs = crud.create_user_preferences(db, user_id=user_id)
     else:
         prefs.onboarding_status = "in_progress"
         prefs.onboarding_history = initial_history
@@ -46,11 +38,11 @@ def initialize_onboarding(db: Session, user_id: int = 1) -> str:
 
 def process_onboarding_turn(db: Session, user_response: str, user_id: int = 1) -> dict:
     """Process a single response from the user and determine the next action."""
-    prefs = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
+    prefs = crud.get_user_preferences(db, user_id=user_id)
     if not prefs:
         # Auto-initialize if not exists
         initialize_onboarding(db, user_id=user_id)
-        prefs = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
+        prefs = crud.get_user_preferences(db, user_id=user_id)
 
     # Append user response to history
     history = list(prefs.onboarding_history or [])

@@ -2,17 +2,15 @@ import logging
 import time
 from sqlalchemy.orm import Session
 from app.config import settings
-from app.models import RedditPost, LeadAnalysis, UserPreferences
+from app import crud
 from app.ai_service import analyze_post
 from app.notifier import send_lead_notification
 
 logger = logging.getLogger(__name__)
 
 def analyze_pending_posts(db: Session, user_id: int, limit: int = 10) -> dict:
-    from app.models import UserPreferences
-    
     # Retrieve user intent profile
-    prefs = db.query(UserPreferences).filter(UserPreferences.user_id == user_id).first()
+    prefs = crud.get_user_preferences(db, user_id=user_id)
     if not prefs or prefs.onboarding_status != "completed" or not prefs.profile_json:
         logger.warning(f"User ID={user_id} has not completed onboarding. Skipping analysis.")
         return {"processed": 0, "successful": 0}
@@ -20,18 +18,8 @@ def analyze_pending_posts(db: Session, user_id: int, limit: int = 10) -> dict:
     search_intent_profile = prefs.profile_json
 
     # Find posts that do not have an associated LeadAnalysis entry for this specific user
-    # Using an outer join to identify posts where LeadAnalysis.id is NULL for this user
-    pending_posts = (
-        db.query(RedditPost)
-        .outerjoin(
-            LeadAnalysis, 
-            (LeadAnalysis.post_id == RedditPost.id) & (LeadAnalysis.user_id == user_id)
-        )
-        .filter(LeadAnalysis.id == None)
-        .order_by(RedditPost.created_utc.desc())
-        .limit(limit)
-        .all()
-    )
+    pending_posts = crud.get_pending_posts_for_user(db, user_id=user_id, limit=limit)
+
     
     total_found = len(pending_posts)
     if total_found == 0:
@@ -47,21 +35,20 @@ def analyze_pending_posts(db: Session, user_id: int, limit: int = 10) -> dict:
             analysis_result = analyze_post(post.title, post.content, search_intent_profile=search_intent_profile)
             
             # Persist the user-specific analysis
-            db_analysis = LeadAnalysis(
-                post_id=post.id,
-                user_id=user_id,
-                relevant=analysis_result.get("relevant", False),
-                score=analysis_result.get("score", 0),
-                industry=analysis_result.get("industry", "General"),
-                urgency=analysis_result.get("urgency", "Low"),
-                intent=analysis_result.get("intent", "Unknown"),
-                estimated_budget=analysis_result.get("estimated_budget", "Unspecified"),
-                recommended_service=analysis_result.get("recommended_service", "General Development"),
-                summary=analysis_result.get("summary", ""),
-                suggested_reply=analysis_result.get("suggested_reply", ""),
-                match_reasoning=analysis_result.get("match_reasoning", [])
-            )
-            db.add(db_analysis)
+            db_analysis = crud.create_lead_analysis(db, {
+                "post_id": post.id,
+                "user_id": user_id,
+                "relevant": analysis_result.get("relevant", False),
+                "score": analysis_result.get("score", 0),
+                "industry": analysis_result.get("industry", "General"),
+                "urgency": analysis_result.get("urgency", "Low"),
+                "intent": analysis_result.get("intent", "Unknown"),
+                "estimated_budget": analysis_result.get("estimated_budget", "Unspecified"),
+                "recommended_service": analysis_result.get("recommended_service", "General Development"),
+                "summary": analysis_result.get("summary", ""),
+                "suggested_reply": analysis_result.get("suggested_reply", ""),
+                "match_reasoning": analysis_result.get("match_reasoning", [])
+            })
             db.commit()
             successful_count += 1
             
