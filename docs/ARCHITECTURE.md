@@ -58,8 +58,16 @@ rate-limited by Reddit; embedding/LLM stages are cost-sensitive; notification is
 ### Matcher
 - On each new post embedding, runs a similarity search against the embeddings of *active
   watchers whose subreddit list includes this post's subreddit*
-- Returns candidates above a similarity threshold (global default threshold for MVP; per-watcher
-  tuning is Phase 2, see [[FEATURES]])
+- Returns candidates using a **recall-favoring gate**, not a precisely-tuned threshold: either a
+  deliberately loose similarity cutoff, or a top-K nearest watchers per post (K bounds LLM cost
+  directly, sidestepping the need to guess a score). Since the LLM verifier is the actual
+  precision gate (§ below), this stage only needs to avoid discarding true matches — a false
+  negative here is silent and unrecoverable, whereas a false positive just costs one extra LLM
+  call.
+- The gate value (threshold or K) is a config value, not a hardcoded constant. From day one, log
+  every candidate's similarity score alongside the LLM verifier's final verdict; once enough
+  labeled examples accumulate from real traffic, use that distribution to calibrate the gate.
+  Per-watcher tuning (rather than one global gate) is Phase 2, see [[FEATURES]].
 
 ### LLM Intent Verifier
 - Runs only on candidates that clear the similarity threshold (keeps LLM call volume low)
@@ -105,13 +113,13 @@ worker design.
 |---|---|---|
 | Backend API | FastAPI | `/backend` |
 | Frontend | Next.js (App Router) | `/frontend` |
-| Auth | Clerk / Auth0 / Supabase Auth (TBD) | Don't hand-roll; decide in [[PROGRESS]] open items |
+| Auth | Clerk | |
 | Reddit client | asyncpraw | OAuth script app |
 | Primary DB | Postgres + pgvector | Single datastore for MVP |
-| Queue / broker | Redis (+ Arq or Dramatiq) | Async-native, lightweight vs. Celery |
+| Queue / broker | Redis + Arq | Async-native, lightweight vs. Celery |
 | Embeddings | OpenAI `text-embedding-3-small` | Revisit self-hosted model at scale (Phase 3) |
 | Intent verification | Claude Haiku-class model | Low-cost, only on candidates |
-| Email | Resend / SES (TBD) | |
+| Email | Resend | |
 | Telegram | Bot API | |
 | Billing | Stripe | |
 | Error tracking | Sentry | FastAPI + Next.js SDKs |

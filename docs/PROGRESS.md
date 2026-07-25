@@ -22,23 +22,30 @@ Living status tracker for the project. Update this as work happens — it's the 
 - MVP notification channels: Email + Telegram
 - In-app dashboard/inbox is part of MVP (not notification-only)
 - Feedback loop (thumbs up/down on matches) is roadmap, Phase 2 — not MVP
-- Free and Paid tiers get the same matching speed; tiers differ on watcher count, subreddits per
-  watcher, and notification channels
+- All tiers get the same matching speed; tiers differ on watcher count, subreddit pool, and
+  notification channels
 - Two-stage matching (vector similarity retrieval + LLM intent verification) to solve the
   needs-vs-offers false positive problem
 - Stack: FastAPI (`/backend`) + Next.js (`/frontend`), Postgres+pgvector, Redis, Docker/
   docker-compose for MVP scale (no Kubernetes yet)
+- Product name: **PostPing**
+- Auth provider: **Clerk**
+- Email provider: **Resend**
+- Task queue: **Arq**
+- Tier limits (see [[PRD]] §6 for the full table):
+  - Free: 1 watcher, 3 subreddits total
+  - Standard: 3 watchers, 10 subreddits total
+  - Premium: 10 watchers, 50 subreddits total
+  - Enterprise: custom, contact sales
+- Matcher gate approach: recall-favoring threshold or top-K per post (not a precisely-tuned
+  cutoff) feeding the LLM verifier, calibrated later from logged real-traffic data rather than
+  fixed at planning time — see [[ARCHITECTURE]] Matcher section for the full reasoning.
 
 ## Open decisions (not yet locked)
 
-- [ ] Exact free-tier vs. paid-tier numeric limits (watcher count, subreddits per watcher)
-- [ ] Paid tier pricing (dollar amount)
-- [ ] Auth provider: Clerk vs. Auth0 vs. Supabase Auth vs. custom
-- [ ] Email provider: Resend vs. SES vs. other
-- [ ] Product name (currently placeholder "PostPing")
-- [ ] Initial similarity threshold value for the matcher (will need empirical tuning once real
-      data flows)
-- [ ] Task queue library: Arq vs. Dramatiq vs. Celery
+- [ ] Standard and Premium tier dollar pricing (amounts TBD)
+- [ ] Exact initial value for the matcher's similarity gate/K — deferred by design until there's
+      real ingestion data to calibrate against (see [[ARCHITECTURE]] Matcher section)
 
 ## Milestones
 

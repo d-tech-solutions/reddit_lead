@@ -1,10 +1,21 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mkdir -p \"c:/DD/WORK/CLAUDE/REDDIT/docs\")"
+      "Bash(mkdir -p \"c:/DD/WORK/CLAUDE/REDDIT/docs\")",
+      "Bash(mkdir -p \"c:/DD/WORK/CLAUDE/REDDIT/backend/app/core\" \"c:/DD/WORK/CLAUDE/REDDIT/backend/app/api/v1/endpoints\" \"c:/DD/WORK/CLAUDE/REDDIT/backend/app/db\" \"c:/DD/WORK/CLAUDE/REDDIT/backend/app/models\" \"c:/DD/WORK/CLAUDE/REDDIT/backend/alembic/versions\" \"c:/DD/WORK/CLAUDE/REDDIT/backend/tests\")",
+      "Bash(uv --version)",
+      "PowerShell(uv --version)",
+      "PowerShell(py -0p 2>$null)",
+      "PowerShell(python --version)",
+      "Bash(/c/Users/ADMIN/AppData/Local/Temp/claude/c--DD-WORK-CLAUDE-REDDIT/277ca890-500a-44b9-85fa-4c0b7b7294c5/scratchpad/venv/Scripts/python.exe -m pytest -q)",
+      "Bash(npm --version)",
+      "Bash(npm audit *)",
+      "Bash(npm view *)",
+      "Bash(npm install *)"
     ],
     "additionalDirectories": [
-      "c:\\DD\\WORK\\CLAUDE\\REDDIT"
+      "c:\\DD\\WORK\\CLAUDE\\REDDIT",
+      "c:\\DD\\WORK\\CLAUDE\\REDDIT\\backend\\app"
     ]
   }
 }
