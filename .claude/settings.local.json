@@ -11,7 +11,9 @@
       "Bash(npm --version)",
       "Bash(npm audit *)",
       "Bash(npm view *)",
-      "Bash(npm install *)"
+      "Bash(npm install *)",
+      "Write",
+      "Edit"
     ],
     "additionalDirectories": [
       "c:\\DD\\WORK\\CLAUDE\\REDDIT",

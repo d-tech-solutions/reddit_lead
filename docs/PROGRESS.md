@@ -54,8 +54,8 @@ Living status tracker for the project. Update this as work happens — it's the 
       channels, dashboard, feedback loop timing, tier differentiation)
 - [x] Write PRD, Features, Architecture, Workflow docs
 - [ ] Resolve open decisions above
-- [ ] Scaffold `/backend` (FastAPI project structure, Docker)
-- [ ] Scaffold `/frontend` (Next.js project structure, Docker)
+- [x] Scaffold `/backend` (FastAPI project structure, Docker)
+- [x] Scaffold `/frontend` (Next.js project structure, Docker)
 - [ ] `docker-compose.yml` for local dev (api, workers, postgres+pgvector, redis, frontend)
 - [ ] Reddit API app registration + credentials
 - [ ] Ingestion worker MVP (poll → dedupe → queue)
@@ -74,3 +74,25 @@ Living status tracker for the project. Update this as work happens — it's the 
 - **2026-07-25**: Initial planning session. Discussed core concept, tech stack direction, and
   monitoring approach. Ran through product-shape decisions via structured Q&A (see "Decisions
   locked in" above). Wrote initial doc set (PRD, Features, Architecture, Workflow, Progress).
+- **2026-07-25**: Scaffolded `/backend` — FastAPI app skeleton (`app/main.py`, versioned
+  `api/v1` router, `/health` + `/api/v1/health`), pydantic-settings config, async SQLAlchemy
+  DB session wiring (no models yet), Alembic initialized (async, empty `versions/`), pytest
+  scaffold (health-check tests passing), and a multi-stage Dockerfile. Dependency manager:
+  **uv** (confirmed via user Q&A). `uv` itself isn't installed on this machine, so
+  `pyproject.toml`/`uv.lock` setup was hand-authored and smoke-tested with a throwaway pip venv
+  instead of `uv sync`/`uv run`; Docker build was not executed locally.
+- **2026-07-25**: Scaffolded `/frontend` — Next.js 16 (App Router) via `create-next-app`,
+  TypeScript, Tailwind CSS v4, shadcn/ui (confirmed via user Q&A: **npm** package manager,
+  **Tailwind + shadcn/ui**). Clerk wired end-to-end: `<ClerkProvider>` in the root layout,
+  sign-in/sign-up routes, and a protected `/dashboard` placeholder using `auth()` +
+  `redirectToSignIn()`. Note: Next.js 16 renamed `middleware.ts` to `proxy.ts` and deprecated
+  Clerk's `createRouteMatcher`, so route protection is done per-page rather than in a middleware
+  matcher — see `frontend/README.md` Notes section. Added a thin `lib/api.ts` stub pointed at the
+  backend's `/api/v1` prefix (no real calls yet), `next.config.ts` `output: "standalone"`, and a
+  multi-stage Dockerfile mirroring the backend's builder/runtime split. Verified: `npm run lint`
+  and `npm run build` pass clean; dev server boots and `/dashboard` correctly redirects
+  unauthenticated requests to `/sign-in`. No test framework wired yet (flagged as an open
+  follow-up, not assumed). `npm audit` flags 12-15 high-severity issues, all transitive
+  dev-tooling/Next-internal deps (eslint's minimatch chain, Next's bundled postcss/sharp) — not
+  fixed via `--force` since that would downgrade Next to a very old major version; worth
+  rechecking once real deps are added.
