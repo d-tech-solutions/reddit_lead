@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from app.models import RedditPost, LeadAnalysis
+from app.models import RedditPost, LeadAnalysis, RedditPostIntelligence
 
 def get_post_by_reddit_id(db: Session, reddit_id: str) -> Optional[RedditPost]:
     """
@@ -83,3 +83,25 @@ def get_pending_posts_for_user(db: Session, user_id: int, limit: int = 10) -> Li
         .limit(limit)
         .all()
     )
+
+
+def get_post_intelligence(db: Session, post_id: int) -> Optional[RedditPostIntelligence]:
+    """Retrieve the AI intelligence analysis for a specific post."""
+    return db.query(RedditPostIntelligence).filter(RedditPostIntelligence.post_id == post_id).first()
+
+
+def create_post_intelligence(db: Session, intelligence_data: dict) -> RedditPostIntelligence:
+    """Create and persist a new RedditPostIntelligence record."""
+    intel = RedditPostIntelligence(
+        post_id=intelligence_data["post_id"],
+        problem=intelligence_data.get("problem"),
+        industry=intelligence_data.get("industry", "General"),
+        services_needed=intelligence_data.get("services_needed", []),
+        buying_intent=intelligence_data.get("buying_intent", "Low"),
+        urgency=intelligence_data.get("urgency", "Low"),
+        estimated_budget=intelligence_data.get("estimated_budget", "Unspecified"),
+        summary=intelligence_data.get("summary", ""),
+        embedding=intelligence_data.get("embedding")
+    )
+    db.add(intel)
+    return intel

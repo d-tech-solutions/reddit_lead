@@ -98,12 +98,44 @@ export default function DashboardPage() {
     }
   };
 
+  const pollTaskStatus = async (taskId: string): Promise<any> => {
+    return new Promise((resolve, reject) => {
+      const interval = setInterval(async () => {
+        try {
+          const data = await apiRequest(`/tasks/${taskId}`);
+          if (data.status === 'SUCCESS') {
+            clearInterval(interval);
+            resolve(data.result);
+          } else if (data.status === 'FAILURE' || data.status === 'REVOKED') {
+            clearInterval(interval);
+            reject(new Error(`Background task enqueuing failed with status: ${data.status}`));
+          }
+        } catch (err) {
+          clearInterval(interval);
+          reject(err);
+        }
+      }, 1500);
+    });
+  };
+
   const handleTriggerAnalysis = async () => {
     setIsRefreshingLeads(true);
     try {
-      // First collect latest posts, then score
-      await apiRequest('/collector/trigger', { method: 'POST' });
-      await apiRequest('/leads/analyze', { method: 'POST', json: { limit: 15 } });
+      // First trigger background RSS feed collection
+      const collectData = await apiRequest('/collector/trigger', { method: 'POST' });
+      const collectTaskId = collectData.task_id;
+      if (collectTaskId) {
+        await pollTaskStatus(collectTaskId);
+      }
+
+      // Next trigger background matching analysis scoring
+      const analyzeData = await apiRequest('/leads/analyze', { method: 'POST' });
+      const analyzeTaskId = analyzeData.task_id;
+      if (analyzeTaskId) {
+        await pollTaskStatus(analyzeTaskId);
+      }
+
+      // Load results after matching completes
       await fetchLeads();
     } catch (err) {
       console.error('Trigger matching failed:', err);

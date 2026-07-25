@@ -88,17 +88,18 @@ def collect_leads(db: Session) -> dict:
     subreddits = settings.subreddit_list
     total_fetched = 0
     total_saved = 0
+    new_posts = []
     
     for sub in subreddits:
         posts = fetch_subreddit_posts(sub)
         total_fetched += len(posts)
         
-        for post in posts:
+        for post_data in posts:
             # Check if post already exists in the database
-            exists = crud.get_post_by_reddit_id(db, reddit_id=post["reddit_id"])
+            exists = crud.get_post_by_reddit_id(db, reddit_id=post_data["reddit_id"])
             if not exists:
-                crud.create_reddit_post(db, post)
-
+                post = crud.create_reddit_post(db, post_data)
+                new_posts.append(post)
                 total_saved += 1
         
         try:
@@ -110,5 +111,6 @@ def collect_leads(db: Session) -> dict:
     logger.info(f"Collection cycle complete. Fetched {total_fetched} posts, saved {total_saved} new posts.")
     return {
         "fetched": total_fetched,
-        "saved": total_saved
+        "saved": total_saved,
+        "posts": new_posts
     }

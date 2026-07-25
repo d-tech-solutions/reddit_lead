@@ -6,9 +6,8 @@ from app.models import User
 from app.schemas import MonitoredSubredditsUpdate
 from app.auth_service import get_current_admin
 from app.config import settings
-from app.collector import collect_leads
-from app.analyzer import analyze_pending_posts
 from app import crud
+from app.tasks import fetch_and_match_leads_task, analyze_user_pending_leads_task
 
 router = APIRouter(prefix="/admin", tags=["Superadmin"])
 
@@ -51,21 +50,20 @@ def update_admin_config(data: MonitoredSubredditsUpdate, current_admin: User = D
     return {"status": "success", "monitored_subreddits": settings.MONITORED_SUBREDDITS}
 
 @router.post('/trigger/collect')
-def admin_trigger_collect(current_admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
-    results = collect_leads(db)
-    return {"status": "success", "results": results}
+def admin_trigger_collect(current_admin: User = Depends(get_current_admin)):
+    task = fetch_and_match_leads_task.delay()
+    return {"status": "success", "task_id": task.id}
 
 @router.post('/trigger/analyze')
 def admin_trigger_analyze(limit: int = 15, current_admin: User = Depends(get_current_admin), db: Session = Depends(get_db)):
     # Trigger matching analysis for all users who completed onboarding
-    # Directly query users from database who have onboarding status as completed
     from app.models import UserPreferences
     active_users = db.query(UserPreferences).filter(UserPreferences.onboarding_status == "completed").all()
-    results = {}
+    task_ids = {}
     for user_pref in active_users:
-        res = analyze_pending_posts(db, user_id=user_pref.user_id, limit=limit)
-        results[user_pref.user_id] = res
-    return {"status": "success", "details": results}
+        task = analyze_user_pending_leads_task.delay(user_pref.user_id, limit)
+        task_ids[user_pref.user_id] = task.id
+    return {"status": "success", "task_ids": task_ids}
 
 @router.get('/home')
 def admin_home():

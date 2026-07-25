@@ -1,6 +1,47 @@
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, func, JSON, Float, Boolean, UniqueConstraint
+from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import relationship
 from app.database import Base
+import json
+
+class SafeVector(TypeDecorator):
+    """
+    A vector type that is safe for both PostgreSQL and SQLite.
+    On PostgreSQL, it delegates to pgvector.sqlalchemy.Vector.
+    On SQLite, it falls back to TEXT with JSON serialization.
+    """
+    impl = Text
+    cache_ok = True
+
+    def __init__(self, dimensions=None):
+        super().__init__()
+        self.dimensions = dimensions
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == 'postgresql':
+            try:
+                from pgvector.sqlalchemy import Vector as PGVector
+                return dialect.type_descriptor(PGVector(self.dimensions))
+            except ImportError:
+                pass
+        return dialect.type_descriptor(Text)
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == 'postgresql':
+            return value
+        else:
+            return json.dumps(list(value))
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == 'postgresql':
+            return value
+        else:
+            return json.loads(value)
+
 
 class User(Base):
     __tablename__ = "users"
@@ -31,6 +72,27 @@ class RedditPost(Base):
 
     # One-to-many relationship with LeadAnalysis (since multiple users can analyze the same post)
     analyses = relationship("LeadAnalysis", back_populates="post", cascade="all, delete-orphan")
+    
+    # 1-to-1 relationship with RedditPostIntelligence (since AI extraction runs only once per post)
+    intelligence = relationship("RedditPostIntelligence", back_populates="post", uselist=False, cascade="all, delete-orphan")
+
+
+class RedditPostIntelligence(Base):
+    __tablename__ = "reddit_post_intelligence"
+
+    id = Column(Integer, primary_key=True, index=True)
+    post_id = Column(Integer, ForeignKey("reddit_posts.id", ondelete="CASCADE"), unique=True, index=True, nullable=False)
+    problem = Column(Text, nullable=True)
+    industry = Column(String(100), nullable=True)
+    services_needed = Column(JSON, nullable=True)  # List of strings
+    buying_intent = Column(String(50), nullable=True)  # Low, Medium, High
+    urgency = Column(String(50), nullable=True)  # Low, Medium, High
+    estimated_budget = Column(String(100), nullable=True)
+    summary = Column(Text, nullable=True)
+    embedding = Column(SafeVector(1536), nullable=True)
+    analyzed_at = Column(DateTime, server_default=func.now())
+
+    post = relationship("RedditPost", back_populates="intelligence")
 
 
 class LeadAnalysis(Base):
@@ -72,6 +134,7 @@ class UserPreferences(Base):
     question_count = Column(Integer, default=0, nullable=False)
     confidence = Column(Float, default=0.0, nullable=False)
     profile_json = Column(JSON, nullable=True)  # Stores the final Search Intent Profile JSON
+    embedding = Column(SafeVector(1536), nullable=True)
 
     user = relationship("User", back_populates="preferences")
 

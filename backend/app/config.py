@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
     MIN_NOTIFICATION_SCORE: int = 70
+    CELERY_BROKER_URL: str = "redis://localhost:6379/0"
+    CELERY_RESULT_BACKEND: str = "redis://localhost:6379/0"
 
     # Authentication Settings
     SECRET_KEY: str = "leadradar_secret_key_super_secure_987654321"

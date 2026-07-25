@@ -1,38 +1,48 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-
-from app.database import get_db
 from app.models import User
 from app.auth_service import get_current_user
-from app.collector import collect_leads
-from app.analyzer import analyze_pending_posts
 from app.notifier import send_lead_notification
+from app.tasks import fetch_and_match_leads_task, analyze_user_pending_leads_task
 
 router = APIRouter(tags=["System Triggers"])
 
 @router.post('/collector/trigger')
-def trigger_collector(db: Session = Depends(get_db)):
+def trigger_collector():
     try:
-        results = collect_leads(db)
+        task = fetch_and_match_leads_task.delay()
         return {
             "status": "success",
-            "message": "Reddit collection cycle completed",
-            "details": results
+            "message": "Reddit background collection and matching task enqueued",
+            "task_id": task.id
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Collector failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to enqueue collector task: {str(e)}")
 
 @router.post('/leads/analyze')
-def trigger_user_analysis(limit: int = 10, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def trigger_user_analysis(limit: int = 10, current_user: User = Depends(get_current_user)):
     try:
-        results = analyze_pending_posts(db, user_id=current_user.id, limit=limit)
+        task = analyze_user_pending_leads_task.delay(current_user.id, limit)
         return {
             "status": "success",
-            "message": "AI matching analysis complete",
-            "details": results
+            "message": "AI background matching analysis task enqueued",
+            "task_id": task.id
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Matching analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to enqueue analysis task: {str(e)}")
+
+@router.get('/tasks/{task_id}')
+def get_task_status(task_id: str):
+    from celery.result import AsyncResult
+    from app.celery_app import celery_app
+    try:
+        result = AsyncResult(task_id, app=celery_app)
+        return {
+            "task_id": task_id,
+            "status": result.status,
+            "result": result.result if result.ready() else None
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to query task status: {str(e)}")
 
 @router.post('/notifications/test')
 def test_notification():

@@ -52,11 +52,39 @@ export default function AdminCollectorPage() {
     setConsoleLogs((prev) => [...prev, `[${timestamp}] ${msg}`]);
   };
 
+  const pollTaskStatus = async (taskId: string, component: string): Promise<any> => {
+    logToConsole(`${component}: Polling task ID ${taskId}...`);
+    return new Promise((resolve, reject) => {
+      const interval = setInterval(async () => {
+        try {
+          const data = await apiRequest(`/tasks/${taskId}`);
+          logToConsole(`${component}: Task status is ${data.status}`);
+          if (data.status === 'SUCCESS') {
+            clearInterval(interval);
+            resolve(data.result);
+          } else if (data.status === 'FAILURE' || data.status === 'REVOKED') {
+            clearInterval(interval);
+            reject(new Error(`Background task failed with status: ${data.status}`));
+          }
+        } catch (err) {
+          clearInterval(interval);
+          reject(err);
+        }
+      }, 1500);
+    });
+  };
+
   const handleTriggerCollection = async () => {
     logToConsole('COLLECTOR: Spawning Reddit RSS feed collection task...');
     try {
       const data = await apiRequest('/admin/trigger/collect', { method: 'POST' });
-      logToConsole(`COLLECTOR: Completed. Fetched: ${data.results.fetched}, Saved new: ${data.results.saved}`);
+      const taskId = data.task_id;
+      if (taskId) {
+        const result = await pollTaskStatus(taskId, 'COLLECTOR');
+        logToConsole(`COLLECTOR: Completed. Fetched: ${result.fetched}, Saved: ${result.saved}, Matched: ${result.matched_users}`);
+      } else {
+        logToConsole('COLLECTOR: Failed. No task ID enqueued.');
+      }
     } catch (err: any) {
       logToConsole(`COLLECTOR: Error: ${err.message}`);
     }
@@ -66,7 +94,24 @@ export default function AdminCollectorPage() {
     logToConsole('ANALYZER: Spawning AI scoring matcher task for all active user intent profiles...');
     try {
       const data = await apiRequest('/admin/trigger/analyze', { method: 'POST' });
-      logToConsole(`ANALYZER: Completed matching cycle: ` + JSON.stringify(data.details));
+      const taskIds = data.task_ids;
+      if (taskIds && Object.keys(taskIds).length > 0) {
+        logToConsole(`ANALYZER: Enqueued ${Object.keys(taskIds).length} user analysis tasks.`);
+        
+        const pollPromises = Object.entries(taskIds).map(async ([userId, taskId]) => {
+          try {
+            const res = await pollTaskStatus(taskId as string, `ANALYZER (User ${userId})`);
+            logToConsole(`ANALYZER (User ${userId}): Completed matching. Qualified: ${res.processed}, Successful: ${res.successful}`);
+          } catch (e: any) {
+            logToConsole(`ANALYZER (User ${userId}): Failed: ${e.message}`);
+          }
+        });
+        
+        await Promise.all(pollPromises);
+        logToConsole('ANALYZER: Global matching cycle complete.');
+      } else {
+        logToConsole('ANALYZER: Failed. No active users or task IDs returned.');
+      }
     } catch (err: any) {
       logToConsole(`ANALYZER: Error: ${err.message}`);
     }

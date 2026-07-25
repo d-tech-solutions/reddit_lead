@@ -20,12 +20,13 @@ def initialize_onboarding(db: Session, user_id: int = 1) -> str:
     
     if not prefs:
         prefs = crud.create_user_preferences(db, user_id=user_id)
-    else:
-        prefs.onboarding_status = "in_progress"
-        prefs.onboarding_history = initial_history
-        prefs.question_count = 1
-        prefs.confidence = 0.0
-        prefs.profile_json = None
+    
+    prefs.onboarding_status = "in_progress"
+    prefs.onboarding_history = initial_history
+    prefs.question_count = 1
+    prefs.confidence = 0.0
+    prefs.profile_json = None
+    prefs.embedding = None
         
     try:
         db.commit()
@@ -51,6 +52,42 @@ def process_onboarding_turn(db: Session, user_response: str, user_id: int = 1) -
     # Check if OpenAI API Key is missing and return mock response if so
     if not settings.OPENAI_API_KEY or settings.OPENAI_API_KEY == "your_openai_api_key_here":
         logger.warning("OpenAI API key missing. Mocking onboarding conversation turn.")
+        
+        # Check stopping conditions (mock mode)
+        if prefs.question_count >= 6:
+            mock_profile = {
+                "services": ["SaaS MVPs", "Workflow Automation"],
+                "desired_opportunities": ["startups looking for developers"],
+                "target_businesses": ["startups"],
+                "preferred_industries": ["Software"],
+                "excluded_opportunities": ["job posts"]
+            }
+            # Generate embedding for Search Intent Profile
+            services_str = ", ".join(mock_profile["services"])
+            desires_str = ", ".join(mock_profile["desired_opportunities"])
+            targets_str = ", ".join(mock_profile["target_businesses"])
+            industries_str = ", ".join(mock_profile["preferred_industries"])
+            profile_text = f"Services offered: {services_str}. Desired opportunities: {desires_str}. Target customers: {targets_str}. Preferred industries: {industries_str}."
+            
+            try:
+                from app.ai_service import generate_embedding
+                prefs.embedding = generate_embedding(profile_text)
+                logger.info(f"Generated profile embedding (Mock Mode) for user ID={user_id}")
+            except Exception as embed_err:
+                logger.error(f"Failed to generate profile embedding (Mock Mode): {embed_err}")
+                
+            prefs.onboarding_status = "completed"
+            prefs.profile_json = mock_profile
+            prefs.confidence = 0.95
+            prefs.onboarding_history = history
+            db.commit()
+            return {
+                "status": "completed",
+                "profile": mock_profile,
+                "confidence": 0.95,
+                "message": "Preferences setup completed successfully! Your search intent profile is active (Mock Mode)."
+            }
+            
         mock_question = "What type of clients do you usually enjoy working with?"
         history.append({"role": "assistant", "content": mock_question})
         prefs.onboarding_history = history
@@ -140,6 +177,26 @@ def process_onboarding_turn(db: Session, user_response: str, user_id: int = 1) -
         confidence_met = confidence >= 0.90
         
         if confidence_met or max_questions_reached or not next_question:
+            # Generate embedding for Search Intent Profile
+            services_str = ", ".join(profile.get("services", []))
+            desires_str = ", ".join(profile.get("desired_opportunities", []))
+            targets_str = ", ".join(profile.get("target_businesses", []))
+            industries_str = ", ".join(profile.get("preferred_industries", []))
+            
+            profile_text = (
+                f"Services offered: {services_str}. "
+                f"Desired opportunities: {desires_str}. "
+                f"Target customers: {targets_str}. "
+                f"Preferred industries: {industries_str}."
+            )
+            
+            try:
+                from app.ai_service import generate_embedding
+                prefs.embedding = generate_embedding(profile_text)
+                logger.info(f"Generated profile embedding for user ID={user_id}")
+            except Exception as embed_err:
+                logger.error(f"Failed to generate profile embedding: {embed_err}")
+
             # Complete onboarding
             prefs.onboarding_status = "completed"
             prefs.profile_json = profile

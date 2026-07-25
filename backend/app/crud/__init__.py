@@ -12,7 +12,9 @@ from app.crud.post import (
     get_post_by_reddit_id,
     get_post_by_id,
     create_reddit_post,
-    get_pending_posts_for_user
+    get_pending_posts_for_user,
+    get_post_intelligence,
+    create_post_intelligence
 )
 
 from app.crud.lead import (
