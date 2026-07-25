@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p \"c:/DD/WORK/CLAUDE/REDDIT/docs\")"
+    ],
+    "additionalDirectories": [
+      "c:\\DD\\WORK\\CLAUDE\\REDDIT"
+    ]
+  }
+}
