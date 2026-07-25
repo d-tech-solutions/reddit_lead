@@ -1,6 +1,6 @@
 # Product Requirements Document
 
-**Product working title:** PostPing *(placeholder — rename anytime, used only as a reference name across these docs)*
+**Product name:** PostPing
 **Status:** Draft v1
 **Last updated:** 2026-07-25
 
@@ -52,19 +52,21 @@ in near real time when a genuine match appears.
 
 ## 6. Pricing / tiers (Freemium)
 
-Both tiers get the same matching speed (near real-time polling) — see architecture decision. The
+All tiers get the same matching speed (near real-time polling) — see architecture decision. The
 differentiator is **capacity and channels**, not latency.
 
-| | Free | Paid |
-|---|---|---|
-| Watchers | 1 | Multiple (e.g. up to 10, TBD) |
-| Subreddits per watcher | Limited (e.g. up to 3) | Higher/unlimited |
-| Notification channels | Email only | Email + Telegram |
-| Match history / dashboard | Yes | Yes |
-| Matching speed | Same as paid | Same as free |
+| | Free | Standard | Premium | Enterprise |
+|---|---|---|---|---|
+| Watchers | 1 | 3 | 10 | Custom |
+| Subreddits (total across watchers) | 3 | 10 | 50 | Custom |
+| Notification channels | Email only | Email + Telegram | Email + Telegram | Custom |
+| Match history / dashboard | Yes | Yes | Yes | Yes |
+| Matching speed | Same across all tiers | Same across all tiers | Same across all tiers | Same across all tiers |
+| Price | $0 | TBD | TBD | Contact sales |
 
-Exact numeric limits are placeholders to be tuned once real usage/cost data exists — flagged in
-[[PROGRESS]] as an open item.
+Subreddit limits are a **total pool shared across a user's watchers**, not per-watcher (e.g. a
+Standard user could put all 10 subreddits on one watcher, or spread them 3/3/4 across three
+watchers). Standard/Premium dollar pricing is still open — flagged in [[PROGRESS]].
 
 ## 7. Core user flow (MVP)
 
