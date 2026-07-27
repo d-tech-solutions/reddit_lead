@@ -56,7 +56,8 @@ Living status tracker for the project. Update this as work happens — it's the 
 - [ ] Resolve open decisions above
 - [x] Scaffold `/backend` (FastAPI project structure, Docker)
 - [x] Scaffold `/frontend` (Next.js project structure, Docker)
-- [ ] `docker-compose.yml` for local dev (api, workers, postgres+pgvector, redis, frontend)
+- [x] `docker-compose.yml` for local dev (api, postgres+pgvector, redis, frontend) — worker
+      services deferred until worker code exists
 - [ ] Reddit API app registration + credentials
 - [ ] Ingestion worker MVP (poll → dedupe → queue)
 - [ ] Embedding worker MVP
@@ -96,3 +97,15 @@ Living status tracker for the project. Update this as work happens — it's the 
   dev-tooling/Next-internal deps (eslint's minimatch chain, Next's bundled postcss/sharp) — not
   fixed via `--force` since that would downgrade Next to a very old major version; worth
   rechecking once real deps are added.
+- **2026-07-26**: Added root `docker-compose.yml` (services: `postgres` on `pgvector/pgvector:pg16`
+  with `docker/postgres/init.sql` running `CREATE EXTENSION vector` on first boot, `redis:7-alpine`,
+  `api`, `frontend`) plus root `.env.example` for Postgres credential overrides. `worker-ingest`/
+  `worker-embed`/`worker-match`/`worker-notify` from the architecture doc's compose topology are
+  deferred — no worker entrypoints exist yet, so those services would just crash-loop; add them
+  alongside the ingestion/embedding/matcher/notifier milestones. In the process, discovered
+  `backend/uv.lock` was never generated (the 2026-07-25 backend scaffold session didn't have `uv`
+  installed) — installed `uv` and ran `uv lock` to generate it, since the backend Dockerfile's
+  `COPY pyproject.toml uv.lock` step hard-requires it. Verified the full stack with a real
+  `docker compose up --build`: postgres/redis/api all report healthy, api's `/health` and
+  `/api/v1/health` both return `{"status":"ok"}`, and frontend serves `/` with Clerk's dev-browser
+  headers present. Stack was torn down (`docker compose down`) after verification.
