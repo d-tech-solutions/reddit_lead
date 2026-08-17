@@ -35,7 +35,8 @@ Backend (`/backend`, uses **uv**):
 
 ```
 uv sync                       # install deps
-uv run pytest                 # tests
+uv run pytest                 # tests (DB-backed ones skip if Postgres isn't up)
+uv run pytest -m db           # only the tests needing a live Postgres
 uv run ruff check .           # lint
 uv run alembic upgrade head   # apply migrations
 uv run alembic revision --autogenerate -m "..."
