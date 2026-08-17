@@ -41,10 +41,38 @@ uv run ruff check .           # lint
 uv run alembic upgrade head   # apply migrations
 uv run alembic revision --autogenerate -m "..."
 uv run uvicorn app.main:app --reload
-python -m app.workers.ingest  # ingestion worker
+python -m app.workers.ingest              # ingestion worker (own process, interval loop)
+arq app.workers.embed.WorkerSettings      # embedding worker (Arq consumer)
+arq app.workers.match.WorkerSettings      # matcher + LLM verifier (Arq consumer)
 ```
 
+**On this machine none of those backend commands run on the host.** A Windows Application Control
+policy blocks the `uv` binary *and* `_ctypes.pyd` in the uv-managed CPython, so anything importing
+`asyncpg` — every DB test, plus alembic — dies with `ImportError: DLL load failed while importing
+_ctypes`. Run them in a container instead:
+
+```
+docker run --rm --network postping_default -v "<repo>\backend:/w" -w /w \
+  -e UV_PROJECT_ENVIRONMENT=/opt/venv \
+  -e DATABASE_URL="postgresql+asyncpg://postgres:postgres@postgres:5432/postping" \
+  python:3.12-slim sh -c "pip install uv && uv sync --frozen && /opt/venv/bin/pytest"
+```
+
+Swap the last command for `/opt/venv/bin/ruff check --ignore EXE002 .` or
+`/opt/venv/bin/alembic upgrade head`. `UV_PROJECT_ENVIRONMENT` is not optional — without it
+`uv sync` writes `.venv` into the mounted directory and clobbers the host's Windows venv. The
+`EXE002` ignore is because every file looks executable across a Windows bind mount. From Git Bash,
+prefix docker commands with `MSYS_NO_PATHCONV=1` or `-w /w` is rewritten to `W:/`.
+
+Dev-only helper: `docker compose exec api python -m scripts.seed_matches --email you@example.com`
+writes fake confirmed matches so the feed UI works without live API keys (`--clear` removes them).
+
 Frontend (`/frontend`, uses **npm**): `npm run dev` / `npm run lint` / `npm run build`.
+
+**Next.js 16 differs from older App Router conventions** — `frontend/AGENTS.md` requires reading
+`node_modules/next/dist/docs/` before writing frontend code. The ones that have bitten already:
+`fetch` is uncached by default, post-mutation refresh is `refresh()` from `next/cache` (Server
+Actions only), Cache Components (`use cache`) is opt-in and off, and middleware lives in `proxy.ts`.
 
 ## Reddit data source
 
