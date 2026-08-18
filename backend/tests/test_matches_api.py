@@ -70,9 +70,6 @@ async def make_match(
     match = Match(
         watcher_id=watcher.id,
         reddit_post_id=post.id,
-        similarity=0.61,
-        direction_score=-0.04,
-        adjusted_score=0.58,
         llm_verified=verified,
         llm_reason="They are asking for exactly this work." if verified else "Wrong direction.",
         llm_model="fake-model",
@@ -116,16 +113,6 @@ async def test_feed_excludes_rejected_and_unverified(auth_client, db_session, db
     # NULL means "the verifier has not run", not "probably fine" — it must be excluded as firmly
     # as an outright rejection.
     assert response.json()["items"] == []
-
-
-async def test_feed_never_exposes_the_scores(auth_client, db_session, db_user):
-    watcher = await make_watcher(db_session, db_user)
-    await make_match(db_session, watcher, await make_post(db_session))
-
-    item = (await auth_client.get("/api/v1/matches")).json()["items"][0]
-
-    for internal in ("similarity", "direction_score", "adjusted_score"):
-        assert internal not in item
 
 
 async def test_feed_is_newest_first(auth_client, db_session, db_user):

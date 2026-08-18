@@ -80,25 +80,25 @@ class FakeRedis:
         self.jobs.append((name, args[0], _job_id))
 
 
-async def test_poll_once_enqueues_an_embed_job_per_new_post(monkeypatch, patched_ingest):
+async def test_poll_once_enqueues_a_match_job_per_new_post(monkeypatch, patched_ingest):
     _patch_subreddits(monkeypatch, ["forhire"])
     source = FakeSource({"forhire": [{"reddit_post_id": "a"}, {"reddit_post_id": "b"}]})
     redis = FakeRedis()
 
     await ingest.poll_once(session=None, source=source, redis=redis)
 
-    assert [job[0] for job in redis.jobs] == ["embed_post", "embed_post"]
+    assert [job[0] for job in redis.jobs] == ["match_post", "match_post"]
     # The job id is derived from the post id so a duplicate enqueue is a no-op.
-    assert all(job[2] == f"embed_post:{job[1]}" for job in redis.jobs)
+    assert all(job[2] == f"match_post:{job[1]}" for job in redis.jobs)
 
 
-async def test_enqueue_for_embedding_without_redis_is_a_noop():
-    await ingest.enqueue_for_embedding(None, [uuid.uuid4()])
+async def test_enqueue_for_matching_without_redis_is_a_noop():
+    await ingest.enqueue_for_matching(None, [uuid.uuid4()])
 
 
 async def test_ingestion_survives_a_failing_queue(monkeypatch, patched_ingest):
-    # Storing posts must succeed even when the queue is unreachable; the embed worker's backfill
-    # sweep is what recovers the missed jobs.
+    # Storing posts must succeed even when the queue is unreachable; the matcher's backfill sweep
+    # is what recovers the missed jobs.
     _patch_subreddits(monkeypatch, ["forhire"])
     source = FakeSource({"forhire": [{"reddit_post_id": "a"}]})
 

@@ -35,13 +35,6 @@ async def test_create_returns_the_watcher(auth_client):
     body = response.json()
     assert body["name"] == "dev hiring"
     assert body["subreddits"] == ["forhire"]
-    assert body["direction"] == "requesting"
-    assert body["embedded_at"] is None
-
-
-async def test_create_never_leaks_the_embedding(auth_client):
-    response = await auth_client.post("/api/v1/watchers", json=payload())
-    assert "intent_embedding" not in response.json()
 
 
 async def test_created_watcher_is_owned_by_the_caller(auth_client, db_session, db_user):
@@ -152,54 +145,15 @@ async def test_patch_can_pause_a_watcher(auth_client):
     assert response.json()["status"] == "paused"
 
 
-async def test_changing_the_intent_clears_the_embedding(auth_client, db_session):
+async def test_patch_can_change_the_intent_text(auth_client):
     created = (await auth_client.post("/api/v1/watchers", json=payload())).json()
-    watcher_id = uuid.UUID(created["id"])
 
-    # Pretend the embedding worker has already run.
-    watcher = await db_session.get(Watcher, watcher_id)
-    watcher.intent_embedding = [0.1] * 1536
-    from datetime import UTC, datetime
-
-    watcher.embedded_at = datetime.now(UTC)
-    await db_session.commit()
-
-    await auth_client.patch(
-        f"/api/v1/watchers/{watcher_id}",
+    response = await auth_client.patch(
+        f"/api/v1/watchers/{created['id']}",
         json={"intent_text": "people who need a logo designed for a startup"},
     )
 
-    await db_session.refresh(watcher)
-    # The stale vector must go, or the matcher keeps comparing posts to the old wording.
-    assert watcher.intent_embedding is None
-    assert watcher.embedded_at is None
-
-
-async def test_renaming_does_not_clear_the_embedding(auth_client, db_session):
-    created = (await auth_client.post("/api/v1/watchers", json=payload())).json()
-    watcher = await db_session.get(Watcher, uuid.UUID(created["id"]))
-    watcher.intent_embedding = [0.1] * 1536
-    await db_session.commit()
-
-    await auth_client.patch(f"/api/v1/watchers/{created['id']}", json={"name": "new name"})
-
-    await db_session.refresh(watcher)
-    # Only the intent text feeds the vector — re-embedding on a rename would be wasted spend.
-    assert watcher.intent_embedding is not None
-
-
-async def test_resending_the_same_intent_does_not_clear_the_embedding(auth_client, db_session):
-    created = (await auth_client.post("/api/v1/watchers", json=payload())).json()
-    watcher = await db_session.get(Watcher, uuid.UUID(created["id"]))
-    watcher.intent_embedding = [0.1] * 1536
-    await db_session.commit()
-
-    await auth_client.patch(
-        f"/api/v1/watchers/{created['id']}", json={"intent_text": VALID_INTENT}
-    )
-
-    await db_session.refresh(watcher)
-    assert watcher.intent_embedding is not None
+    assert response.json()["intent_text"] == "people who need a logo designed for a startup"
 
 
 async def test_patch_lets_a_capped_user_edit_their_watcher(auth_client):

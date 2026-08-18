@@ -46,9 +46,8 @@ def test_create_normalises_subreddits():
     assert payload.subreddits == ["forhire", "jobshiring"]
 
 
-def test_create_defaults_direction_and_status():
+def test_create_defaults_status():
     payload = WatcherCreate(name="devs", intent_text=VALID_INTENT, subreddits=["forhire"])
-    assert payload.direction == "requesting"
     assert payload.status == "active"
 
 
@@ -73,13 +72,6 @@ def test_intent_at_the_minimum_length_is_accepted():
 def test_empty_subreddit_list_is_rejected():
     with pytest.raises(ValidationError):
         WatcherCreate(name="devs", intent_text=VALID_INTENT, subreddits=[])
-
-
-def test_unknown_direction_is_rejected():
-    with pytest.raises(ValidationError):
-        WatcherCreate(
-            name="devs", intent_text=VALID_INTENT, subreddits=["forhire"], direction="sideways"
-        )
 
 
 def test_unknown_status_is_rejected():
