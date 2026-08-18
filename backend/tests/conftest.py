@@ -1,4 +1,3 @@
-import hashlib
 import uuid
 
 import pytest
@@ -7,7 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.api.deps import get_current_user
 from app.core.config import get_settings
-from app.core.constants import EMBEDDING_DIMENSIONS
 from app.db.session import get_db
 from app.main import app
 from app.models.user import User
@@ -23,7 +21,7 @@ async def client() -> AsyncClient:
 # --- Database-backed test support -------------------------------------------------------------
 #
 # CRUD behaviour worth testing (FK cascades, the unique constraint, the tier queries) needs real
-# Postgres — pgvector, ARRAY and UUID rule out SQLite. Tests that need it are marked `db` and skip
+# Postgres — ARRAY and UUID columns rule out SQLite. Tests that need it are marked `db` and skip
 # automatically when Postgres is unreachable, so a plain `pytest` still passes with no services
 # running. See CLAUDE.md for how to run the full suite.
 
@@ -114,60 +112,35 @@ async def auth_client(db_session: AsyncSession, db_user: User) -> AsyncClient:
         app.dependency_overrides.clear()
 
 
-class FakeEmbeddingProvider:
-    """Test double satisfying the `EmbeddingProvider` protocol — no network, no API key, no spend.
-
-    Vectors are derived from a hash of the input, so they are deterministic and distinct per text
-    but carry no semantic meaning. Good enough to prove the worker moves data correctly; useless
-    for judging match quality, which needs the real model.
-    """
-
-    def __init__(self, fail_on: set[str] | None = None) -> None:
-        self.calls: list[list[str]] = []
-        self.fail_on = fail_on or set()
-        self.closed = False
-
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        self.calls.append(list(texts))
-        for text in texts:
-            if text in self.fail_on:
-                raise RuntimeError("embedding provider is down")
-        return [self._vector(text) for text in texts]
-
-    def _vector(self, text: str) -> list[float]:
-        digest = hashlib.sha256(text.encode()).digest()
-        # Cycle the digest bytes out to the full column width, scaled into [0, 1).
-        return [digest[index % len(digest)] / 256 for index in range(EMBEDDING_DIMENSIONS)]
-
-    async def close(self) -> None:
-        self.closed = True
-
-
-@pytest.fixture
-def fake_provider() -> FakeEmbeddingProvider:
-    return FakeEmbeddingProvider()
-
-
 class FakeVerifier:
     """Test double satisfying the `IntentVerifier` protocol — no network, no key, no spend.
 
-    Returns a fixed verdict, or raises for intents listed in `fail_on`, so tests can exercise the
-    matcher's success and failure paths without asserting anything about real model behaviour.
+    Returns a fixed verdict for every candidate in the batch, or raises if any candidate's intent
+    is listed in `fail_on`, so tests can exercise the matcher's success and failure paths without
+    asserting anything about real model behaviour.
     """
 
     def __init__(self, matches: bool = True, fail_on: set[str] | None = None) -> None:
         self.matches = matches
         self.fail_on = fail_on or set()
-        self.calls: list[tuple[str, str, str]] = []
+        self.calls: list[tuple[str, str, list[tuple[uuid.UUID, str]]]] = []
         self.closed = False
 
-    async def verify(self, intent_text: str, direction: str, title: str, body: str):
+    async def verify_batch(self, post_title: str, post_body: str, candidates):
         from app.workers.verifier import Verdict
 
-        self.calls.append((intent_text, direction, title))
-        if intent_text in self.fail_on:
-            raise RuntimeError("verifier is down")
-        return Verdict(matches=self.matches, reason="fake verdict", model="fake-model")
+        self.calls.append((post_title, post_body, list(candidates)))
+        verdicts = []
+        for watcher_id, intent_text in candidates:
+            if intent_text in self.fail_on:
+                raise RuntimeError("verifier is down")
+            verdicts.append(
+                Verdict(
+                    watcher_id=watcher_id, matches=self.matches, reason="fake verdict",
+                    model="fake-model",
+                )
+            )
+        return verdicts
 
     async def close(self) -> None:
         self.closed = True

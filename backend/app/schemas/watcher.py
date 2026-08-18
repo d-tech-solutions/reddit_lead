@@ -12,7 +12,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.core.constants import DIRECTION_REQUESTING, STATUS_ACTIVE
+from app.core.constants import STATUS_ACTIVE
 
 # Reddit's own rule: 3-21 characters, letters, digits and underscores.
 SUBREDDIT_PATTERN = re.compile(r"^[a-z0-9_]{3,21}$")
@@ -63,7 +63,6 @@ class WatcherCreate(BaseModel):
     subreddits: Annotated[
         list[str], Field(min_length=1, max_length=MAX_SUBREDDITS_PER_WATCHER)
     ]
-    direction: Literal["requesting", "offering"] = DIRECTION_REQUESTING
     status: Literal["active", "paused"] = STATUS_ACTIVE
 
     @field_validator("subreddits")
@@ -87,7 +86,6 @@ class WatcherUpdate(BaseModel):
     subreddits: (
         Annotated[list[str], Field(min_length=1, max_length=MAX_SUBREDDITS_PER_WATCHER)] | None
     ) = None
-    direction: Literal["requesting", "offering"] | None = None
     status: Literal["active", "paused"] | None = None
 
     @field_validator("subreddits")
@@ -102,16 +100,11 @@ class WatcherUpdate(BaseModel):
 
 
 class WatcherRead(BaseModel):
-    """What the API returns. Deliberately omits `intent_embedding` — 1536 floats nobody needs."""
-
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
     name: str
     intent_text: str
     subreddits: list[str]
-    direction: str
     status: str
     created_at: datetime
-    # Null until the embedding worker has processed it; the UI can show "preparing…" on that.
-    embedded_at: datetime | None

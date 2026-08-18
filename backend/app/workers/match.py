@@ -1,20 +1,13 @@
-"""Matcher worker: pick candidate watchers for each embedded post, then have Claude judge them.
+"""Matcher worker: ask an LLM whether each active, subscribed watcher matches a new post.
 
-Runs as an Arq consumer (`arq app.workers.match.WorkerSettings`), triggered by the embedding
-worker the moment a post's vector lands, with a backfill sweep as the safety net — same two-trigger
-shape as the embedding worker, for the same reasons (docs/embedding-worker/README.md §3).
+Runs as an Arq consumer (`arq app.workers.match.WorkerSettings`), triggered by the ingestion
+worker the moment a post is inserted, with a backfill sweep as the safety net — same two-trigger
+shape the pipeline has used throughout (docs/ingestion-worker/README.md §3).
 
-Two stages per post:
-
-1. **Vector gate (recall).** Find active watchers whose subreddit list covers this post, score
-   them by cosine similarity minus a direction penalty, and keep the top K. Deliberately loose:
-   a false positive here costs one cheap LLM call, a false negative is silent and unrecoverable.
-2. **Verifier (precision).** Claude answers yes or no per candidate. Its verdict is what reaches
-   the user.
-
-Every candidate is written to `matches` whether it passes or fails, with its similarity, direction
-score, and verdict. That log is the only way to eventually calibrate K from real traffic instead of
-guessing (ARCHITECTURE.md, Matcher section).
+One stage per post: find every active watcher whose subreddit list covers this post (a plain DB
+query, no vector search), then ask the verifier for one verdict per watcher in a single batched
+call (chunked if there are many candidates). Every candidate is written to `matches` whether it
+passes or fails, so the rejected rows stay a record of what the verifier saw and decided.
 """
 
 from __future__ import annotations
@@ -35,82 +28,38 @@ from app.db.session import async_session_factory
 from app.models.match import Match
 from app.models.reddit_post import RedditPost
 from app.models.watcher import Watcher
-from app.workers.direction import compute_direction_axis, direction_penalty, direction_score
-from app.workers.embedding_source import build_embedding_provider
-from app.workers.verifier import IntentVerifier, build_verifier
+from app.workers.verifier import IntentVerifier, Verdict, build_verifier
 
 logger = logging.getLogger(__name__)
 
 
-# Cosine similarity between two vectors that are not assumed to be unit length.
-def cosine(left: list[float], right: list[float]) -> float:
-    dot = sum(a * b for a, b in zip(left, right, strict=True))
-    left_len = sum(a * a for a in left) ** 0.5
-    right_len = sum(b * b for b in right) ** 0.5
-    if left_len == 0 or right_len == 0:
-        return 0.0
-    return dot / (left_len * right_len)
-
-
-# Load the active, embedded watchers that cover this post's subreddit.
-# Filtering by subreddit in SQL keeps the candidate set small before any vector maths.
+# Load the active watchers that cover this post's subreddit. Filtering in SQL keeps the candidate
+# set small before anything is sent to the LLM.
 async def fetch_candidate_watchers(session: AsyncSession, subreddit: str) -> list[Watcher]:
     result = await session.execute(
         select(Watcher).where(
             Watcher.status == "active",
-            Watcher.intent_embedding.is_not(None),
             Watcher.subreddits.any(subreddit),
         )
     )
     return list(result.scalars())
 
 
-# Score every candidate watcher against one post and return the best K, highest first.
-#
-# The direction penalty depends on the post *and* the watcher's `direction`, so it does not
-# reorder watchers that all want the same side — its job there is to push the whole candidate set
-# down below the gate when the post points the wrong way. Across watchers wanting opposite sides,
-# it separates them correctly.
-def rank_watchers(
-    post_embedding: list[float],
-    watchers: list[Watcher],
-    axis: list[float],
-    weight: float,
-    top_k: int,
-) -> list[tuple[Watcher, float, float, float]]:
-    post_direction = direction_score(post_embedding, axis)
-
-    scored: list[tuple[Watcher, float, float, float]] = []
-    for watcher in watchers:
-        similarity = cosine(watcher.intent_embedding, post_embedding)
-        penalty = direction_penalty(post_direction, watcher.direction)
-        scored.append((watcher, similarity, post_direction, similarity - weight * penalty))
-
-    scored.sort(key=lambda row: row[3], reverse=True)
-    return scored[:top_k]
+# Split candidates into fixed-size groups so one busy subreddit doesn't become one oversized call.
+def chunk_watchers(watchers: list[Watcher], batch_size: int) -> list[list[Watcher]]:
+    return [watchers[index : index + batch_size] for index in range(0, len(watchers), batch_size)]
 
 
-# Write one candidate row per (watcher, post), skipping pairs already recorded.
-# Returns the ids of rows genuinely inserted, so a re-run does not re-verify old candidates.
-async def store_candidates(
-    session: AsyncSession,
-    post_id: UUID,
-    ranked: list[tuple[Watcher, float, float, float]],
+# Write one placeholder row per (watcher, post), skipping pairs already recorded. `llm_verified`
+# stays NULL until a verdict is applied — a job that dies mid-batch leaves a clean trail the
+# backfill sweep already knows how to find, with the same partial index as before.
+async def store_placeholder_matches(
+    session: AsyncSession, post_id: UUID, watcher_ids: list[UUID]
 ) -> list[UUID]:
-    if not ranked:
+    if not watcher_ids:
         return []
 
-    rows = [
-        {
-            "watcher_id": watcher.id,
-            "reddit_post_id": post_id,
-            "similarity": similarity,
-            "direction_score": post_direction,
-            "adjusted_score": adjusted,
-        }
-        for watcher, similarity, post_direction, adjusted in ranked
-    ]
-
+    rows = [{"watcher_id": watcher_id, "reddit_post_id": post_id} for watcher_id in watcher_ids]
     statement = (
         insert(Match)
         .values(rows)
@@ -123,73 +72,70 @@ async def store_candidates(
     return inserted
 
 
-# Run the vector gate for one post. Returns the ids of new candidate rows awaiting a verdict.
-async def gate_post(
-    session: AsyncSession, post: RedditPost, axis: list[float], settings: Any
-) -> list[UUID]:
-    watchers = await fetch_candidate_watchers(session, post.subreddit)
-    if not watchers:
-        return []
+# Write a batch of verdicts back onto their match rows, one commit for the whole batch. Skips a
+# verdict whose row is missing or already judged, so a retried batch is idempotent.
+async def apply_verdicts(session: AsyncSession, post_id: UUID, verdicts: list[Verdict]) -> int:
+    if not verdicts:
+        return 0
 
-    ranked = rank_watchers(
-        post.embedding,
-        watchers,
-        axis,
-        settings.MATCH_DIRECTION_WEIGHT,
-        settings.MATCH_TOP_K,
-    )
-    candidate_ids = await store_candidates(session, post.id, ranked)
-    logger.info(
-        "gate: post=%s subreddit=r/%s watchers=%d candidates=%d",
-        post.reddit_post_id,
-        post.subreddit,
-        len(watchers),
-        len(candidate_ids),
-    )
-    return candidate_ids
+    confirmed = 0
+    now = datetime.now(UTC)
+    for verdict in verdicts:
+        result = await session.execute(
+            select(Match).where(
+                Match.reddit_post_id == post_id,
+                Match.watcher_id == verdict.watcher_id,
+                Match.llm_verified.is_(None),
+            )
+        )
+        match = result.scalar_one_or_none()
+        if match is None:
+            continue
 
+        match.llm_verified = verdict.matches
+        match.llm_reason = verdict.reason
+        match.llm_model = verdict.model
+        match.verified_at = now
+        if verdict.matches:
+            confirmed += 1
 
-# Ask the verifier about one candidate row and record the verdict.
-# On API failure the row is left NULL so the backfill sweep retries it.
-async def verify_candidate(
-    session: AsyncSession, verifier: IntentVerifier, match_id: UUID
-) -> bool | None:
-    match = await session.get(Match, match_id)
-    if match is None or match.llm_verified is not None:
-        return None
-
-    watcher = await session.get(Watcher, match.watcher_id)
-    post = await session.get(RedditPost, match.reddit_post_id)
-    if watcher is None or post is None:
-        logger.warning("verify: match %s references a missing row, skipping", match_id)
-        return None
-
-    verdict = await verifier.verify(
-        watcher.intent_text, watcher.direction, post.title, post.body or ""
-    )
-
-    match.llm_verified = verdict.matches
-    match.llm_reason = verdict.reason
-    match.llm_model = verdict.model
-    match.verified_at = datetime.now(UTC)
     await session.commit()
+    return confirmed
 
+
+# Ask the verifier about one chunk of candidates and apply the verdicts. A failed chunk is logged
+# and left NULL — the backfill sweep retries it — rather than failing the whole post.
+async def _verify_and_apply(
+    session: AsyncSession,
+    verifier: IntentVerifier,
+    post: RedditPost,
+    watchers: list[Watcher],
+) -> int:
+    candidates = [(watcher.id, watcher.intent_text) for watcher in watchers]
+    try:
+        verdicts = await verifier.verify_batch(post.title, post.body or "", candidates)
+    except Exception:
+        logger.exception(
+            "verify: post=%s batch of %d watchers failed, left for backfill",
+            post.reddit_post_id,
+            len(watchers),
+        )
+        return 0
+
+    confirmed = await apply_verdicts(session, post.id, verdicts)
     logger.info(
-        "verify: post=%s watcher=%s similarity=%.3f direction=%+.3f verdict=%s reason=%s",
+        "verify: post=%s watchers=%d verdicts=%d confirmed=%d",
         post.reddit_post_id,
-        watcher.name,
-        match.similarity,
-        match.direction_score,
-        verdict.matches,
-        verdict.reason,
+        len(watchers),
+        len(verdicts),
+        confirmed,
     )
-    return verdict.matches
+    return confirmed
 
 
-# Arq job: gate one post, then verify each new candidate.
-# Enqueued by the embedding worker once the post has a vector.
+# Arq job: judge one post against every active watcher subscribed to its subreddit.
+# Enqueued by the ingestion worker the moment a post is inserted.
 async def match_post(ctx: dict[str, Any], post_id: str) -> int:
-    axis: list[float] = ctx["axis"]
     verifier: IntentVerifier = ctx["verifier"]
     settings = ctx["settings"]
 
@@ -198,65 +144,82 @@ async def match_post(ctx: dict[str, Any], post_id: str) -> int:
         if post is None:
             logger.warning("match_post: post %s no longer exists", post_id)
             return 0
-        if post.embedding is None:
-            logger.warning("match_post: post %s has no embedding yet, skipping", post_id)
+
+        watchers = await fetch_candidate_watchers(session, post.subreddit)
+        if not watchers:
             return 0
 
-        candidate_ids = await gate_post(session, post, axis, settings)
+        await store_placeholder_matches(session, post.id, [watcher.id for watcher in watchers])
 
         confirmed = 0
-        for match_id in candidate_ids:
-            if await verify_candidate(session, verifier, match_id):
-                confirmed += 1
+        for chunk in chunk_watchers(watchers, settings.MATCH_BATCH_SIZE):
+            confirmed += await _verify_and_apply(session, verifier, post, chunk)
 
     return confirmed
 
 
-# Load candidate rows that no verdict has been recorded for, oldest first.
-async def fetch_unverified(session: AsyncSession, limit: int) -> list[UUID]:
+# Load candidate rows that no verdict has been recorded for, oldest first, grouped by post so each
+# group can go through the verifier in one batched call.
+async def fetch_unverified_by_post(session: AsyncSession, limit: int) -> dict[UUID, list[UUID]]:
     result = await session.execute(
-        select(Match.id)
+        select(Match.reddit_post_id, Match.watcher_id)
         .where(Match.llm_verified.is_(None))
         .order_by(Match.created_at)
         .limit(limit)
     )
-    return list(result.scalars())
+    grouped: dict[UUID, list[UUID]] = {}
+    for post_id, watcher_id in result.all():
+        grouped.setdefault(post_id, []).append(watcher_id)
+    return grouped
 
 
-# Load embedded posts that the gate has never run against.
-# `NOT EXISTS` rather than a join so a post with zero candidates is not re-gated forever — it gets
-# one row per matching watcher, and with no matching watchers there is nothing to write. Posts in
-# subreddits nobody watches are therefore re-checked each sweep, which is cheap and also correct:
-# a watcher added later should pick them up.
-async def fetch_ungated_posts(session: AsyncSession, limit: int) -> list[RedditPost]:
-    gated = select(Match.reddit_post_id).where(Match.reddit_post_id == RedditPost.id)
+# Load posts that have no `matches` row at all — the ones a `match_post` job never ran for
+# (enqueue failure, or a job that exhausted its retries). A post in a subreddit nobody watches
+# produces no candidates and so is re-checked every sweep; that is cheap and also correct, since a
+# watcher added later should still pick it up.
+async def fetch_unmatched_posts(session: AsyncSession, limit: int) -> list[RedditPost]:
+    has_matches = select(Match.reddit_post_id).where(Match.reddit_post_id == RedditPost.id)
     result = await session.execute(
         select(RedditPost)
-        .where(RedditPost.embedding.is_not(None), ~gated.exists())
+        .where(~has_matches.exists())
         .order_by(RedditPost.fetched_at)
         .limit(limit)
     )
     return list(result.scalars())
 
 
-# Arq cron job: catch posts the queue never gated and candidates whose verification failed.
+# Arq cron job: catch candidates whose verification never completed, and posts no job ever ran for.
 async def backfill(ctx: dict[str, Any]) -> int:
-    axis: list[float] = ctx["axis"]
     verifier: IntentVerifier = ctx["verifier"]
     settings = ctx["settings"]
 
     handled = 0
     async with async_session_factory() as session:
-        # Verify first: unjudged candidates are already-paid-for work waiting on a verdict.
-        for match_id in await fetch_unverified(session, settings.MATCH_BACKFILL_LIMIT):
-            await verify_candidate(session, verifier, match_id)
-            handled += 1
+        # Unjudged candidates first: already-paid-for placeholder rows waiting on a verdict.
+        unverified = await fetch_unverified_by_post(session, settings.MATCH_BACKFILL_LIMIT)
+        for post_id, watcher_ids in unverified.items():
+            post = await session.get(RedditPost, post_id)
+            if post is None:
+                continue
+            watchers = [
+                watcher
+                for watcher_id in watcher_ids
+                if (watcher := await session.get(Watcher, watcher_id)) is not None
+            ]
+            if not watchers:
+                continue
+            for chunk in chunk_watchers(watchers, settings.MATCH_BATCH_SIZE):
+                await _verify_and_apply(session, verifier, post, chunk)
+                handled += len(chunk)
 
-        for post in await fetch_ungated_posts(session, settings.MATCH_BACKFILL_LIMIT):
-            candidate_ids = await gate_post(session, post, axis, settings)
-            for match_id in candidate_ids:
-                await verify_candidate(session, verifier, match_id)
-                handled += 1
+        for post in await fetch_unmatched_posts(session, settings.MATCH_BACKFILL_LIMIT):
+            watchers = await fetch_candidate_watchers(session, post.subreddit)
+            if not watchers:
+                continue
+            await store_placeholder_matches(session, post.id, [w.id for w in watchers])
+            for chunk in chunk_watchers(watchers, settings.MATCH_BATCH_SIZE):
+                await _verify_and_apply(session, verifier, post, chunk)
+                handled += len(chunk)
 
     if handled:
         logger.info("match backfill: handled=%d", handled)
@@ -264,8 +227,6 @@ async def backfill(ctx: dict[str, Any]) -> int:
 
 
 # Turn a "run every N minutes" setting into the minute set Arq's cron helper expects.
-# Duplicated from the embedding worker rather than shared: the two workers are deployed
-# separately and a shared helper would couple their schedules.
 def backfill_minutes(interval_minutes: int) -> set[int]:
     interval = max(1, min(60, interval_minutes))
     while 60 % interval != 0:
@@ -273,8 +234,7 @@ def backfill_minutes(interval_minutes: int) -> set[int]:
     return {minute for minute in range(60) if minute % interval == 0}
 
 
-# Arq startup hook: build the verifier and compute the direction axis once per process.
-# The axis costs one embedding call; recomputing it per job would be pure waste.
+# Arq startup hook: build the verifier once per worker process rather than per job.
 async def startup(ctx: dict[str, Any]) -> None:
     settings = get_settings()
     logging.basicConfig(
@@ -282,19 +242,12 @@ async def startup(ctx: dict[str, Any]) -> None:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     ctx["settings"] = settings
-    ctx["verifier"] = build_verifier(settings.ANTHROPIC_API_KEY, settings.VERIFIER_MODEL)
-
-    provider = build_embedding_provider(settings.OPENAI_API_KEY, settings.EMBEDDING_MODEL)
-    try:
-        ctx["axis"] = await compute_direction_axis(provider)
-    finally:
-        await provider.close()
+    ctx["verifier"] = build_verifier(settings.OPENAI_API_KEY, settings.VERIFIER_MODEL)
 
     logger.info(
-        "matcher starting: verifier=%s top_k=%d direction_weight=%.2f backfill_every=%dm",
+        "matcher starting: verifier=%s batch_size=%d backfill_every=%dm",
         settings.VERIFIER_MODEL,
-        settings.MATCH_TOP_K,
-        settings.MATCH_DIRECTION_WEIGHT,
+        settings.MATCH_BATCH_SIZE,
         settings.MATCH_BACKFILL_INTERVAL_MINUTES,
     )
 

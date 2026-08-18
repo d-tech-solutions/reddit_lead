@@ -3,10 +3,6 @@
 A match is only interesting alongside the post it found and the watcher that caught it, so the
 read model embeds both. That keeps the feed a single round trip instead of N+1 lookups from the
 UI, and it is why these are hand-written rather than a `from_attributes` mirror of the ORM row.
-
-Deliberately absent: `similarity`, `direction_score`, `adjusted_score`. Those exist to calibrate
-the gate (docs/PROGRESS.md, open decisions) and mean nothing to a user — exposing them would
-invite reading a cosine distance as a confidence percentage, which it is not.
 """
 
 from __future__ import annotations

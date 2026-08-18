@@ -5,15 +5,6 @@ Kept here rather than in a worker module so `app.models` never has to import fro
 
 from dataclasses import dataclass
 
-# Output width of OpenAI's `text-embedding-3-small`. This is baked into the pgvector column type,
-# so changing it means a migration plus re-embedding every row — it is not a runtime setting.
-EMBEDDING_DIMENSIONS = 1536
-
-# What a watcher is looking for: someone asking for work, or someone advertising it.
-DIRECTION_REQUESTING = "requesting"
-DIRECTION_OFFERING = "offering"
-DIRECTIONS = (DIRECTION_REQUESTING, DIRECTION_OFFERING)
-
 # A watcher the pipeline acts on, versus one the user has switched off.
 STATUS_ACTIVE = "active"
 STATUS_PAUSED = "paused"

@@ -51,19 +51,19 @@ async def store_posts(session: AsyncSession, posts: list[dict[str, Any]]) -> lis
     return inserted
 
 
-# Hand new post ids to the embedding worker. Deliberately non-fatal: ingestion must not stop
-# because the next stage is unreachable, and the embed worker's backfill sweep catches anything
-# that never made it onto the queue.
-async def enqueue_for_embedding(redis: ArqRedis | None, post_ids: list[uuid.UUID]) -> None:
+# Hand new post ids to the matcher. Deliberately non-fatal: ingestion must not stop because the
+# next stage is unreachable, and the matcher's own backfill sweep catches anything that never
+# made it onto the queue.
+async def enqueue_for_matching(redis: ArqRedis | None, post_ids: list[uuid.UUID]) -> None:
     if redis is None or not post_ids:
         return
 
     for post_id in post_ids:
         try:
             # A job id derived from the post id makes a duplicate enqueue a no-op.
-            await redis.enqueue_job("embed_post", str(post_id), _job_id=f"embed_post:{post_id}")
+            await redis.enqueue_job("match_post", str(post_id), _job_id=f"match_post:{post_id}")
         except Exception:
-            logger.exception("ingest: failed enqueueing embed job for post %s", post_id)
+            logger.exception("ingest: failed enqueueing match job for post %s", post_id)
 
 
 async def poll_once(
@@ -83,7 +83,7 @@ async def poll_once(
             continue
 
         new_ids = await store_posts(session, posts)
-        await enqueue_for_embedding(redis, new_ids)
+        await enqueue_for_matching(redis, new_ids)
         new_count = len(new_ids)
         total_new += new_count
         logger.info("ingest: r/%s fetched=%d new=%d", subreddit, len(posts), new_count)
@@ -111,13 +111,13 @@ async def main() -> None:
         settings.REDDIT_POLL_INTERVAL_SECONDS,
     )
 
-    # A missing Redis is survivable — posts still get stored, and the embedding worker's backfill
-    # sweep will pick them up — so a failed connection is logged rather than fatal.
+    # A missing Redis is survivable — posts still get stored, and the matcher's backfill sweep
+    # will pick them up — so a failed connection is logged rather than fatal.
     redis: ArqRedis | None = None
     try:
         redis = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
     except Exception:
-        logger.exception("ingest: could not connect to Redis, embed jobs will not be enqueued")
+        logger.exception("ingest: could not connect to Redis, match jobs will not be enqueued")
 
     try:
         while True:
