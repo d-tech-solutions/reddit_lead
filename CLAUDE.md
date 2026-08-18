@@ -3,23 +3,19 @@
 Reddit intent-alert SaaS: users create "watchers" (subreddits + a plain-language description of
 the kind of request they want to catch), and the app notifies them when a matching post appears.
 
-**Status**: ingestion, embedding, and matcher/LLM-verifier workers built. Auth (Clerk) + watcher
-CRUD built end to end, API and UI. Match feed built end to end (API + UI). Notification worker not
-started.
+**Status**: ingestion and matcher/LLM-verifier workers built. Auth (Clerk) + watcher CRUD built end
+to end, API and UI. Match feed built end to end (API + UI). Notification worker not started.
 
 ## Start here
 
 Before making any product or architecture decision, read `/docs`:
 
 - `docs/PRD.md` — problem, target users, tiers/pricing, MVP scope, risks
-- `docs/FEATURES.md` — feature list by phase (MVP / Phase 2 / Phase 3)
 - `docs/ARCHITECTURE.md` — pipeline design, tech stack, data model, deployment, monitoring
 - `docs/WORKFLOW.md` — user and system sequence flows
-- `docs/PROGRESS.md` — decisions already locked in, open items, milestone checklist — check this
-  first to avoid re-litigating settled decisions
-- `docs/ingestion-worker/`, `docs/embedding-worker/`, `docs/matcher/`, `docs/auth-and-watchers/`,
-  `docs/watcher-ui/`, `docs/match-feed/` — code-level walkthroughs. Each built component gets its
-  own `docs/<component-name>/` folder.
+- `docs/ingestion-worker/`, `docs/matcher/`, `docs/auth-and-watchers/`, `docs/watcher-ui/`,
+  `docs/match-feed/` — code-level walkthroughs. Each built component gets its own
+  `docs/<component-name>/` folder.
 
 ## Locked decisions (see docs/PROGRESS.md for the full list)
 
@@ -42,7 +38,6 @@ uv run alembic upgrade head   # apply migrations
 uv run alembic revision --autogenerate -m "..."
 uv run uvicorn app.main:app --reload
 python -m app.workers.ingest              # ingestion worker (own process, interval loop)
-arq app.workers.embed.WorkerSettings      # embedding worker (Arq consumer)
 arq app.workers.match.WorkerSettings      # matcher + LLM verifier (Arq consumer)
 ```
 
@@ -81,9 +76,8 @@ Actions only), Cache Components (`use cache`) is opt-in and off, and middleware 
 - `rss` — public `.rss` feeds, no credentials. **Local dev only**: unofficial, no post bodies.
 - `api` — official read-only OAuth via asyncpraw. **Required for production.**
 
-Official API access needs manual approval under Reddit's Responsible Builder Policy and is not
-yet granted — see `docs/PROGRESS.md`. Do not propose scraping as a workaround
-(`docs/ARCHITECTURE.md` §8).
+Official API access needs manual approval under Reddit's Responsible Builder Policy and is not yet
+granted. Do not propose scraping as a workaround (`docs/ARCHITECTURE.md` §8).
 
 ## Rules for Claude
 
@@ -107,4 +101,4 @@ async def fetch_new_posts(subreddit: str, since: datetime) -> list[RedditPost]:
 
 This file is intentionally thin. Once scaffolding starts, extend it with actual dev commands
 (run/test/lint), folder structure, and any conventions that emerge — but keep product/architecture
-rationale in `/docs`, not here. Update `docs/PROGRESS.md` as milestones complete.
+rationale in `/docs`, not here.

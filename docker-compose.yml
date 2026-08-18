@@ -84,28 +84,6 @@ services:
       redis:
         condition: service_healthy
 
-  worker-embed:
-    build:
-      context: ./backend
-    environment:
-      ENVIRONMENT: local
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postping}
-      REDIS_URL: redis://redis:6379/0
-      LOG_LEVEL: INFO
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-100}
-      EMBED_BACKFILL_INTERVAL_MINUTES: ${EMBED_BACKFILL_INTERVAL_MINUTES:-5}
-      EMBED_BACKFILL_LIMIT: ${EMBED_BACKFILL_LIMIT:-500}
-    volumes:
-      - ./backend/app:/app/app
-    command: arq app.workers.embed.WorkerSettings
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
   worker-match:
     build:
       context: ./backend
@@ -115,11 +93,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       LOG_LEVEL: INFO
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      VERIFIER_MODEL: ${VERIFIER_MODEL:-claude-haiku-4-5}
-      MATCH_TOP_K: ${MATCH_TOP_K:-10}
-      MATCH_DIRECTION_WEIGHT: ${MATCH_DIRECTION_WEIGHT:-1.0}
+      VERIFIER_MODEL: ${VERIFIER_MODEL:-gpt-4o-mini}
+      MATCH_BATCH_SIZE: ${MATCH_BATCH_SIZE:-15}
       MATCH_BACKFILL_INTERVAL_MINUTES: ${MATCH_BACKFILL_INTERVAL_MINUTES:-5}
       MATCH_BACKFILL_LIMIT: ${MATCH_BACKFILL_LIMIT:-200}
     volumes:

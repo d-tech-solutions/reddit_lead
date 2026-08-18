@@ -10,9 +10,9 @@ import type { MatchPage, Watcher } from "@/lib/types";
 
 // Load the feed and the user's watchers together.
 //
-// The watchers are not decoration: an empty feed means three very different things depending on
-// whether the user has any watchers, whether they are still being embedded, or whether they are
-// live and nothing has matched. Answering that needs both payloads.
+// The watchers are not decoration: an empty feed means different things depending on whether the
+// user has any watchers, whether all of them are paused, or whether they are active and nothing
+// has matched yet. Answering that needs both payloads.
 async function loadFeed(): Promise<
   | { ok: true; page: MatchPage; watchers: Watcher[] }
   | { ok: false; status: number | null; message: string }
@@ -60,7 +60,6 @@ function EmptyState({ watchers }: { watchers: Watcher[] }) {
   }
 
   const active = watchers.filter((watcher) => watcher.status === "active");
-  const ready = active.filter((watcher) => watcher.embedded_at !== null);
 
   if (active.length === 0) {
     return (
@@ -79,20 +78,6 @@ function EmptyState({ watchers }: { watchers: Watcher[] }) {
     );
   }
 
-  if (ready.length === 0) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Still getting ready</CardTitle>
-        </CardHeader>
-        <CardContent className="text-sm text-muted-foreground">
-          Your watchers are being prepared. This usually takes a minute or two — reload the page
-          shortly.
-        </CardContent>
-      </Card>
-    );
-  }
-
   return (
     <Card>
       <CardHeader>
@@ -100,8 +85,8 @@ function EmptyState({ watchers }: { watchers: Watcher[] }) {
       </CardHeader>
       <CardContent className="text-sm text-muted-foreground">
         Nothing has matched yet. PostPing is checking{" "}
-        {ready.length === 1 ? "your watcher" : `all ${ready.length} of your watchers`} against new
-        posts as they appear — this page fills in on its own.
+        {active.length === 1 ? "your watcher" : `all ${active.length} of your watchers`} against
+        new posts as they appear — this page fills in on its own.
       </CardContent>
     </Card>
   );

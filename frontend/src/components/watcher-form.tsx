@@ -6,13 +6,6 @@ import { createWatcherAction, type ActionState } from "@/app/actions/watchers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 
 const INITIAL: ActionState = { error: null };
@@ -45,21 +38,6 @@ export function WatcherForm() {
       </div>
 
       <div className="grid gap-2">
-        <Label htmlFor="direction">I want to find people who are</Label>
-        {/* Direction is a field rather than something inferred from the description: embeddings
-            do not reliably encode which side of a transaction a post is on. */}
-        <Select name="direction" defaultValue="requesting">
-          <SelectTrigger id="direction">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="requesting">Requesting work (looking to hire)</SelectItem>
-            <SelectItem value="offering">Offering work (advertising services)</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-
-      <div className="grid gap-2">
         <Label htmlFor="intent_text">What should I look for?</Label>
         <Textarea
           id="intent_text"
@@ -71,7 +49,9 @@ export function WatcherForm() {
           placeholder="Someone asking for a React developer to build or fix their web app"
         />
         <p className="text-xs text-muted-foreground">
-          Describe it the way you would to a person. The more specific, the fewer false alarms.
+          Describe it the way you would to a person — including whether they&apos;re looking to
+          hire, offering their own services, or you just want to know about a topic. The more
+          specific, the fewer false alarms.
         </p>
       </div>
 

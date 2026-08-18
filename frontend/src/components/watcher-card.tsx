@@ -37,14 +37,7 @@ export function WatcherCard({ watcher }: { watcher: Watcher }) {
         <div className="grid gap-1">
           <CardTitle className="text-base">{watcher.name}</CardTitle>
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="secondary">
-              {watcher.direction === "offering" ? "Offering work" : "Requesting work"}
-            </Badge>
             {paused ? <Badge variant="outline">Paused</Badge> : null}
-            {/* Until the embedding worker has run, this watcher is invisible to the matcher. */}
-            {watcher.embedded_at === null ? (
-              <Badge variant="outline">Preparing…</Badge>
-            ) : null}
           </div>
         </div>
 

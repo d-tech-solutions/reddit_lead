@@ -1,7 +1,6 @@
 // Mirrors the Pydantic schemas in backend/app/schemas/. Kept hand-written rather than generated:
 // the surface is small, and a generator would be one more build step to keep working.
 
-export type WatcherDirection = "requesting" | "offering";
 export type WatcherStatus = "active" | "paused";
 
 export interface Watcher {
@@ -9,11 +8,8 @@ export interface Watcher {
   name: string;
   intent_text: string;
   subreddits: string[];
-  direction: WatcherDirection;
   status: WatcherStatus;
   created_at: string;
-  // Null until the embedding worker has processed it — the UI shows "preparing" on that.
-  embedded_at: string | null;
 }
 
 export interface Usage {

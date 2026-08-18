@@ -1,13 +1,15 @@
-"""The precision gate: ask Claude whether a post really matches a watcher's intent.
+"""The verifier: ask an LLM whether a post matches each candidate watcher's intent.
 
-The vector stage is tuned for recall — it hands over candidates that are topically close and
-point the right way, and is wrong often enough that acting on it directly would spam users
-(docs/PROGRESS.md, 2026-07-30: raw similarity put six offer posts above every request, at a
-confident-looking 0.51–0.63). This stage decides yes or no, and its verdict is what reaches the
-user.
+One batched call handles every watcher currently subscribed to a post's subreddit — the model
+sees all of them side by side and returns one verdict per candidate. This both bounds LLM spend
+per post (one call per post, or a handful for a very busy subreddit, instead of one call per
+candidate) and lets the model directly contrast similar-sounding intents instead of judging each
+in isolation, which is what let a vector-based gate get direction backwards in the earlier design
+(see docs/matcher/README.md).
 
-Structured as a protocol plus one implementation, same as `embedding_source`: the worker depends
-on the interface and the tests substitute a fake that never calls the network.
+Structured as a protocol plus one implementation, same shape the codebase already used for the
+old embedding provider: the worker depends on the interface, and tests substitute a fake that
+never calls the network.
 """
 
 from __future__ import annotations
@@ -16,168 +18,201 @@ import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
-# Claude Haiku-class, per ARCHITECTURE.md §5 — this runs on every candidate, so cost per call is
-# the constraint. Worth re-testing against a larger model once there is labelled data to score on.
-DEFAULT_MODEL = "claude-haiku-4-5"
+# Cheap and fast, run once per post (or per batch of candidates) rather than per candidate.
+DEFAULT_MODEL = "gpt-4o-mini"
 
-# A verdict needs a word or two of reasoning, not an essay. Kept small because this is per
-# candidate and the reason is only ever read by a human debugging a bad match.
-MAX_TOKENS = 300
+# Reasoning plus a verdict per candidate, times up to MATCH_BATCH_SIZE candidates in one reply.
+MAX_OUTPUT_TOKENS = 2000
 
 # Truncate post text before sending. Reddit posts run long and the decision is almost always
 # clear from the opening; this bounds per-call cost.
 MAX_POST_CHARS = 4000
 
+# Truncate each watcher's intent so one unusually long description doesn't crowd out the others.
+MAX_INTENT_CHARS = 1000
+
 SYSTEM_PROMPT = """\
-You judge whether a Reddit post matches what a user is watching for. You will be given the \
-user's description of what they want to find, the direction they care about, and one post.
+You judge whether a Reddit post matches what each of several users is watching for. You will be \
+given one post and a numbered list of candidate watchers, each with their own description of \
+what they want to find. Return one verdict per candidate, referenced by its number.
 
-Answer with JSON only: {"matches": true|false, "reason": "<one short sentence>"}.
+For each candidate, decide on three things, all of which must hold for a match:
 
-Decide on three things, all of which must hold for a match:
+1. Direction. Read the candidate's description and work out which side of a transaction they \
+want: someone REQUESTING work (looking to hire, buy, or get something done), someone OFFERING \
+work (advertising their own services or availability), or neither (they just want to know about \
+posts on a topic, with no request or offer implied). Then check which side the poster in THIS \
+POST is actually on. A post about the same topic from the opposite side of the transaction is \
+NOT a match. Judge this from what the poster is actually doing, not from tags or title \
+formatting, which posters often get wrong. If the candidate is watching for a topic with no \
+particular side, direction does not rule the post out — judge on subject and substance alone.
 
-1. Direction. If the user wants someone REQUESTING work, the poster must be looking to hire, \
-buy, or get something done. If the user wants someone OFFERING, the poster must be advertising \
-their own services or availability. This is the most common way a post looks relevant but is \
-not: a post about the same topic from the opposite side of the transaction is NOT a match. Judge \
-this from what the poster is actually doing, not from tags or title formatting, which posters \
-often get wrong.
+2. Subject. The post must be about the specific kind of work or topic the candidate described. \
+Same direction but a different field is not a match — someone hiring a marketer does not match a \
+candidate watching for people hiring developers.
 
-2. Subject. The post must be about the specific kind of work the user described. Same direction \
-but a different field is not a match — someone hiring a marketer does not match a user watching \
-for people hiring developers.
+3. Substance. The post must be a real instance of the thing, not a discussion of it, a meta post, \
+a survey, or a job board digest.
 
-3. Substance. The post must be a real instance of the thing, not a discussion of it, a meta \
-post, a survey, or a job board digest.
+When a candidate's description is too vague to judge, or the post is too vague to tell, answer \
+false for that candidate. A missed match costs the user one opportunity; a false match costs them \
+trust in every future alert — ties go to false.
 
-When the post is too vague to tell, answer false. A missed match costs the user one opportunity; \
-a false match costs them trust in every future alert.\
+Give a one-sentence reasoning for every candidate, then your verdict, in the order they were \
+given. Cover every candidate number exactly once.\
 """
+
+VERDICT_SCHEMA: dict[str, Any] = {
+    "name": "verdicts",
+    "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "verdicts": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "candidate_number": {"type": "integer"},
+                        "reasoning": {"type": "string"},
+                        "matches": {"type": "boolean"},
+                    },
+                    "required": ["candidate_number", "reasoning", "matches"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["verdicts"],
+        "additionalProperties": False,
+    },
+}
 
 
 @dataclass
 class Verdict:
+    watcher_id: UUID
     matches: bool
     reason: str
     model: str
 
 
 class IntentVerifier(Protocol):
-    async def verify(
-        self, intent_text: str, direction: str, title: str, body: str
-    ) -> Verdict: ...
+    async def verify_batch(
+        self, post_title: str, post_body: str, candidates: list[tuple[UUID, str]]
+    ) -> list[Verdict]: ...
 
     async def close(self) -> None: ...
 
 
-# Assemble the single user turn describing one candidate. Kept as one block so the stable system
-# prompt stays byte-identical across calls and the volatile part is all at the end.
-def build_prompt(intent_text: str, direction: str, title: str, body: str) -> str:
-    wanted = "OFFERING their services" if direction == "offering" else "REQUESTING work"
-    post = f"{title}\n\n{body}".strip() if body.strip() else title.strip()
+# Assemble the user turn: the post, then every candidate numbered so the model's reply maps back
+# to a watcher_id in code rather than asking it to echo a UUID verbatim.
+def build_prompt(post_title: str, post_body: str, candidates: list[tuple[UUID, str]]) -> str:
+    post = f"{post_title}\n\n{post_body}".strip() if post_body.strip() else post_title.strip()
+    numbered = "\n\n".join(
+        f"Candidate {index}: {intent_text[:MAX_INTENT_CHARS]}"
+        for index, (_, intent_text) in enumerate(candidates, start=1)
+    )
     return (
-        f"The user wants to find posts from someone {wanted}.\n\n"
-        f"What the user described: {intent_text}\n\n"
-        f"--- POST ---\n{post[:MAX_POST_CHARS]}\n--- END POST ---"
+        f"--- POST ---\n{post[:MAX_POST_CHARS]}\n--- END POST ---\n\n"
+        f"--- CANDIDATES ---\n{numbered}\n--- END CANDIDATES ---"
     )
 
 
-# Pull the verdict out of Claude's reply. Tolerates the model wrapping JSON in prose or a fence,
-# because a parse failure here would otherwise discard a decision that was actually made.
-def parse_verdict(text: str, model: str) -> Verdict:
-    cleaned = text.strip()
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        raise ValueError(f"no JSON object in verifier reply: {cleaned[:200]!r}")
-
-    payload = json.loads(cleaned[start : end + 1])
-    if "matches" not in payload:
-        raise ValueError(f"verifier reply missing 'matches': {payload!r}")
-
-    return Verdict(
-        matches=_coerce_bool(payload["matches"]),
-        reason=str(payload.get("reason", "")).strip()[:500],
-        model=model,
-    )
-
-
-# Read a verdict flag that may arrive as a real boolean or as a quoted string.
-# `bool("false")` is True, so the string case has to be handled explicitly or a quoted "false"
-# would be recorded as a match.
-def _coerce_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in ("true", "yes"):
-            return True
-        if lowered in ("false", "no"):
-            return False
-        raise ValueError(f"verifier returned an unreadable 'matches' value: {value!r}")
-    raise ValueError(f"verifier returned a non-boolean 'matches' value: {value!r}")
+# Turn the model's numbered verdicts back into Verdict rows keyed by watcher_id. A candidate
+# number outside the batch, or one the model skipped entirely, is logged and left out — the
+# caller's match row for that candidate stays NULL for the backfill sweep to retry, rather than
+# guessing at a verdict the model never actually gave.
+def apply_candidate_numbers(
+    raw_verdicts: list[dict[str, Any]], candidates: list[tuple[UUID, str]], model: str
+) -> list[Verdict]:
+    verdicts: list[Verdict] = []
+    for entry in raw_verdicts:
+        number = entry.get("candidate_number")
+        if not isinstance(number, int) or not (1 <= number <= len(candidates)):
+            logger.warning(
+                "verify_batch: model returned an out-of-range candidate_number=%r", number
+            )
+            continue
+        watcher_id, _ = candidates[number - 1]
+        verdicts.append(
+            Verdict(
+                watcher_id=watcher_id,
+                matches=bool(entry.get("matches", False)),
+                reason=str(entry.get("reasoning", "")).strip()[:500],
+                model=model,
+            )
+        )
+    return verdicts
 
 
-class ClaudeIntentVerifier:
+class OpenAIIntentVerifier:
     def __init__(self, api_key: str, model: str) -> None:
-        from anthropic import AsyncAnthropic
+        from openai import AsyncOpenAI
 
-        self._client = AsyncAnthropic(api_key=api_key)
+        self._client = AsyncOpenAI(api_key=api_key)
         self._model = model
 
-    # Ask Claude for one yes/no verdict on one candidate.
-    # Raises on API failure so the caller leaves `llm_verified` NULL and the sweep retries.
-    async def verify(self, intent_text: str, direction: str, title: str, body: str) -> Verdict:
-        response = await self._client.messages.create(
+    # Ask the model for one verdict per candidate watcher against one post.
+    # Raises on API failure or a refusal so the caller leaves those match rows NULL and the sweep
+    # retries them.
+    async def verify_batch(
+        self, post_title: str, post_body: str, candidates: list[tuple[UUID, str]]
+    ) -> list[Verdict]:
+        if not candidates:
+            return []
+
+        response = await self._client.chat.completions.create(
             model=self._model,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
+            max_tokens=MAX_OUTPUT_TOKENS,
             messages=[
-                {
-                    "role": "user",
-                    "content": build_prompt(intent_text, direction, title, body),
-                }
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": build_prompt(post_title, post_body, candidates)},
             ],
+            response_format={"type": "json_schema", "json_schema": VERDICT_SCHEMA},
         )
 
-        # A safety refusal is not a "no" — treat it as a failure so the row stays unjudged rather
-        # than silently recording a rejection the model never actually made.
-        if response.stop_reason == "refusal":
-            raise RuntimeError(f"verifier refused to answer (model={self._model})")
+        message = response.choices[0].message
 
-        text = next((block.text for block in response.content if block.type == "text"), "")
+        # A refusal is not a "no" for every candidate — treat it as a failure so the rows stay
+        # unjudged rather than silently recording rejections the model never actually made.
+        refusal = getattr(message, "refusal", None)
+        if refusal:
+            raise RuntimeError(f"verifier refused to answer (model={self._model}): {refusal}")
+
+        payload = json.loads(message.content or "{}")
+        raw_verdicts = payload.get("verdicts", [])
         _log_usage(self._model, getattr(response, "usage", None))
-        return parse_verdict(text, self._model)
+        return apply_candidate_numbers(raw_verdicts, candidates, self._model)
 
     async def close(self) -> None:
         await self._client.close()
 
 
-# Log tokens and estimated cost per verdict. This is the second stage that spends money per post,
-# and unlike embedding it scales with K rather than with post count (ARCHITECTURE.md §7).
+# Log tokens and estimated cost per batch call. GPT-4o-mini: $0.15 per million input tokens, $0.60
+# per million output — update these if the model or its published rate changes.
 def _log_usage(model: str, usage: Any) -> None:
     if usage is None:
         return
-    # Claude Haiku 4.5: $1 per million input tokens, $5 per million output.
-    cost = (usage.input_tokens / 1_000_000) + (usage.output_tokens * 5 / 1_000_000)
+    cost = (usage.prompt_tokens * 0.15 + usage.completion_tokens * 0.60) / 1_000_000
     logger.info(
-        "verify: model=%s in=%d out=%d est_cost_usd=%.6f",
+        "verify_batch: model=%s in=%d out=%d est_cost_usd=%.6f",
         model,
-        usage.input_tokens,
-        usage.output_tokens,
+        usage.prompt_tokens,
+        usage.completion_tokens,
         cost,
     )
 
 
 # Construct the verifier, failing at startup with an actionable message when the key is missing
-# rather than on the first candidate. Same contract as build_embedding_provider.
+# rather than on the first batch.
 def build_verifier(api_key: str, model: str) -> IntentVerifier:
     if not api_key:
         raise ValueError(
-            "ANTHROPIC_API_KEY is required to run the matcher. "
+            "OPENAI_API_KEY is required to run the matcher. "
             "Set it in backend/.env for local runs, or in the root .env for docker compose."
         )
-    return ClaudeIntentVerifier(api_key, model)
+    return OpenAIIntentVerifier(api_key, model)

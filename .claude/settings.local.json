@@ -121,7 +121,11 @@
       "Bash(MSYS_NO_PATHCONV=1 docker compose exec -T api python -m scripts.seed_matches --clear)",
       "Bash(curl -s -o /dev/null -w \"GET /matches -> %{http_code} redirect: %{redirect_url}\\\\n\" http://localhost:3000/matches)",
       "Bash(MSYS_NO_PATHCONV=1 docker run --rm --network postping_default -v \"C:\\\\DD\\\\WORK\\\\CLAUDE\\\\REDDIT\\\\backend:/w\" -w /w -e UV_PROJECT_ENVIRONMENT=/opt/venv -e DATABASE_URL=\"postgresql+asyncpg://postgres:postgres@postgres:5432/postping\" python:3.12-slim sh -c \"pip install -q uv && uv sync --frozen -q && /opt/venv/bin/ruff check --ignore EXE002 . && /opt/venv/bin/pytest -q 2>&1 | tail -6\")",
-      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3000/dashboard)"
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3000/dashboard)",
+      "Skill(claude-api)",
+      "Skill(claude-api:*)",
+      "Bash(docker info *)",
+      "PowerShell(docker version 2>&1)"
     ],
     "additionalDirectories": [
       "c:\\DD\\WORK\\CLAUDE\\REDDIT",

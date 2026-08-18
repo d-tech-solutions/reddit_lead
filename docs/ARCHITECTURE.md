@@ -9,10 +9,8 @@ and monitoring for Phase 1 (MVP), with notes on what changes in later phases.
 flowchart LR
     Reddit[(Reddit API)] --> Ingest[Ingestion Worker]
     Ingest --> Queue[[Redis Queue]]
-    Queue --> Embed[Embedding Worker]
-    Embed --> VDB[(Postgres + pgvector)]
-    VDB --> Match[Matcher: post vs watcher embeddings]
-    Match -->|candidates above threshold| Verify[LLM Intent Verifier]
+    Queue --> Match[Matcher: every active watcher<br/>subscribed to the post's subreddit]
+    Match -->|one batched call per post| Verify[LLM Intent Verifier]
     Verify -->|confirmed match| Notify[Notification Worker]
     Notify --> Email[Email]
     Notify --> Telegram[Telegram]
@@ -23,18 +21,18 @@ flowchart LR
 ```
 
 Each stage is a separate worker process so it can be scaled independently in Docker (ingestion is
-rate-limited by Reddit; embedding/LLM stages are cost-sensitive; notification is bursty).
+rate-limited by Reddit; the matcher/verifier stage is cost-sensitive; notification is bursty).
 
 ## 2. Why this shape (recap of key decisions)
 
 - **Watchers are scoped to specific subreddits** (not all of Reddit) — bounds ingestion volume,
-  keeps embedding/LLM cost predictable, matches Reddit API rate limits. See [[PRD]] §8.
-- **Two-stage matching** (vector similarity → LLM verification) exists specifically to solve the
-  "offers vs. needs" false-positive problem described in [[PRD]] §1 — embedding similarity alone
-  cannot distinguish intent direction reliably.
-- **pgvector inside Postgres**, not a separate vector DB, for MVP — one datastore to operate, and
-  watcher count (the side we query against) stays small even as post volume grows, so pgvector's
-  performance ceiling is not a near-term concern.
+  keeps LLM cost predictable, matches Reddit API rate limits. See [[PRD]] §8.
+- **Single-stage LLM matching** exists specifically to solve the "offers vs. needs" false-positive
+  problem described in [[PRD]] §1. An earlier vector-similarity gate was tried and dropped:
+  embedding similarity alone could not distinguish intent direction reliably, and a bolted-on
+  "direction axis" correction was needed to compensate. Sending every subscribed watcher straight
+  to the LLM — batched one call per post — removes that failure mode instead of correcting for it,
+  at the cost of no longer having a cheap pre-filter stage; see [[matcher]] for the full reasoning.
 - **Same matching speed for free and paid** (per PRD tier decision) — the ingestion/matching
   pipeline runs once, uniformly; tier logic only gates watcher count, subreddit count, and
   notification channels at the API layer.
@@ -50,30 +48,18 @@ rate-limited by Reddit; embedding/LLM stages are cost-sensitive; notification is
 - Dedupes by Reddit post ID before pushing to the queue
 - Emits a heartbeat on every successful poll cycle (used by uptime monitoring, see §7)
 
-### Embedding Worker
+### Matcher + LLM Verifier
 - Consumes new posts from the queue
-- Calls the embedding model (OpenAI `text-embedding-3-small` for MVP) on title + body
-- Writes post + embedding to Postgres (pgvector column)
-
-### Matcher
-- On each new post embedding, runs a similarity search against the embeddings of *active
-  watchers whose subreddit list includes this post's subreddit*
-- Returns candidates using a **recall-favoring gate**, not a precisely-tuned threshold: either a
-  deliberately loose similarity cutoff, or a top-K nearest watchers per post (K bounds LLM cost
-  directly, sidestepping the need to guess a score). Since the LLM verifier is the actual
-  precision gate (§ below), this stage only needs to avoid discarding true matches — a false
-  negative here is silent and unrecoverable, whereas a false positive just costs one extra LLM
-  call.
-- The gate value (threshold or K) is a config value, not a hardcoded constant. From day one, log
-  every candidate's similarity score alongside the LLM verifier's final verdict; once enough
-  labeled examples accumulate from real traffic, use that distribution to calibrate the gate.
-  Per-watcher tuning (rather than one global gate) is Phase 2, see [[FEATURES]].
-
-### LLM Intent Verifier
-- Runs only on candidates that clear the similarity threshold (keeps LLM call volume low)
-- Cheap/fast model (Claude Haiku class) classifies: does this post represent someone requesting
-  the described service, matching the watcher's intent description — yes/no
-- Confirmed matches are written to the `matches` table and enqueued for notification
+- Finds every *active watcher whose subreddit list includes this post's subreddit* — a plain SQL
+  filter, no similarity search or embedding involved
+- Sends the post plus every candidate watcher's intent to an LLM (`gpt-4o-mini`) in a single
+  batched call per post (chunked only if a subreddit has more candidates than the configured
+  batch size), and gets back one yes/no verdict per watcher, judged on direction, subject, and
+  substance together
+- Every candidate is written to the `matches` table, pass or fail — rejected rows are a
+  calibration record of what the verifier saw and decided, not discarded
+- Confirmed matches are enqueued for notification
+- See [[matcher]] for why one batched call per post replaced the earlier vector-gate design
 
 ### Notification Worker
 - Reads a confirmed match + the watcher's configured channels
@@ -96,9 +82,9 @@ rate-limited by Reddit; embedding/LLM stages are cost-sensitive; notification is
 
 ```
 users            (id, email, auth info, plan, created_at)
-watchers         (id, user_id, name, intent_text, intent_embedding, subreddits[], status, created_at)
-reddit_posts     (id, reddit_post_id, subreddit, title, body, author, embedding, fetched_at)
-matches          (id, watcher_id, reddit_post_id, similarity_score, llm_verified bool, created_at, read_at)
+watchers         (id, user_id, name, intent_text, subreddits[], status, created_at)
+reddit_posts     (id, reddit_post_id, subreddit, title, body, author, fetched_at)
+matches          (id, watcher_id, reddit_post_id, llm_verified bool, llm_reason, created_at, read_at)
 notifications    (id, match_id, channel, status, sent_at)
 notification_channels (id, user_id, type[email|telegram], config, verified bool)
 subscriptions    (id, user_id, stripe_customer_id, plan, status)
@@ -115,10 +101,9 @@ worker design.
 | Frontend | Next.js (App Router) | `/frontend` |
 | Auth | Clerk | |
 | Reddit client | asyncpraw | OAuth script app |
-| Primary DB | Postgres + pgvector | Single datastore for MVP |
+| Primary DB | Postgres | Single datastore for MVP |
 | Queue / broker | Redis + Arq | Async-native, lightweight vs. Celery |
-| Embeddings | OpenAI `text-embedding-3-small` | Revisit self-hosted model at scale (Phase 3) |
-| Intent verification | Claude Haiku-class model | Low-cost, only on candidates |
+| Intent verification | OpenAI `gpt-4o-mini` | One batched call per post, covering every candidate watcher — see [[matcher]] |
 | Email | Resend | |
 | Telegram | Bot API | |
 | Billing | Stripe | |
@@ -129,13 +114,13 @@ worker design.
 
 ## 6. Deployment
 
-- **Local/dev**: `docker-compose.yml` with services: `api`, `worker-ingest`, `worker-embed`,
-  `worker-match`, `worker-notify`, `postgres` (pgvector extension enabled), `redis`, `frontend`
+- **Local/dev**: `docker-compose.yml` with services: `api`, `worker-ingest`, `worker-match`,
+  `worker-notify`, `postgres`, `redis`, `frontend`
 - **Production (MVP scale)**: same compose topology on a single host or a managed container
   platform (Fly.io / Railway / a small ECS setup) — avoid Kubernetes until there's a concrete
   need for multi-node horizontal scaling of the worker fleet
-- Workers are stateless and horizontally scalable independently (e.g. more `worker-embed`
-  replicas if embedding becomes the bottleneck, without touching ingestion)
+- Workers are stateless and horizontally scalable independently (e.g. more `worker-match`
+  replicas if verification becomes the bottleneck, without touching ingestion)
 - Config/secrets via environment variables, `.env` for local dev (never committed)
 
 ## 7. Monitoring & observability
@@ -150,8 +135,9 @@ notifications and may not notice for days:
   successful poll cycle; missed pings alert immediately
 - **Structured logs** (structlog) shipped to Loki/ELK, correlated by request/job ID across the
   pipeline stages
-- **Cost tracking**: per-call logging of embedding/LLM spend, since cost scales with ingestion
-  volume (Reddit traffic), not directly with paying-user count — called out as a risk in [[PRD]]
+- **Cost tracking**: per-call logging of LLM spend, since cost scales with ingestion volume
+  (Reddit traffic) — specifically with posts × watchers-per-subreddit — not directly with
+  paying-user count. Called out as a risk in [[PRD]]
 
 ## 8. Security & compliance notes
 

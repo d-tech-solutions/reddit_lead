@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,10 +11,10 @@ from app.db.base import Base
 class Match(Base):
     """A (watcher, post) pair the matcher considered, and what the verifier decided about it.
 
-    Rows are written for *every* candidate that clears the vector gate, not only confirmed
-    matches — the rejected ones are the labelled data that eventually calibrates the gate
-    (see docs/PROGRESS.md, 2026-07-30). Read `llm_verified` to distinguish: NULL means the
-    verifier has not run yet, False means it ran and said no.
+    Rows are written for *every* candidate watcher subscribed to the post's subreddit, not only
+    confirmed matches — the rejected ones are a calibration record of what the verifier saw and
+    decided. Read `llm_verified` to distinguish: NULL means the verifier has not run yet, False
+    means it ran and said no.
     """
 
     __tablename__ = "matches"
@@ -27,14 +27,6 @@ class Match(Base):
     reddit_post_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("reddit_posts.id", ondelete="CASCADE"), index=True
     )
-
-    # Raw cosine similarity between the watcher's intent vector and the post's vector.
-    similarity: Mapped[float] = mapped_column(Float)
-    # Projection of the post onto the global request/offer axis. Positive = reads like an offer,
-    # negative = reads like a request. See app/workers/direction.py.
-    direction_score: Mapped[float] = mapped_column(Float)
-    # similarity minus the direction penalty — what the top-K gate actually ranked on.
-    adjusted_score: Mapped[float] = mapped_column(Float)
 
     # NULL until the verifier runs; False is a real "no", not a missing value.
     llm_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True, index=True)

@@ -20,24 +20,13 @@ class Settings(BaseSettings):
     REDDIT_USER_AGENT: str = "postping/0.1"
     REDDIT_POLL_INTERVAL_SECONDS: int = 60
 
-    # Embedding worker
+    # Matcher + LLM verifier. Every active watcher subscribed to a post's subreddit is judged in
+    # one batched call per post — no embedding stage, no vector gate.
     OPENAI_API_KEY: str = ""
-    EMBEDDING_MODEL: str = "text-embedding-3-small"
-    EMBEDDING_BATCH_SIZE: int = 100
-    # How often the backfill sweep runs, in minutes. Must divide 60 evenly (it becomes an Arq cron
-    # minute set); values that don't are rounded down to the nearest divisor.
-    EMBED_BACKFILL_INTERVAL_MINUTES: int = 5
-    EMBED_BACKFILL_LIMIT: int = 500
-
-    # Matcher + LLM verifier
-    ANTHROPIC_API_KEY: str = ""
-    VERIFIER_MODEL: str = "claude-haiku-4-5"
-    # Candidate watchers per post handed to the verifier. Deliberately generous: on the only real
-    # data measured so far, K=5 would have contained zero true matches. Calibrate from the logged
-    # similarity/verdict pairs in `matches`, not by guessing — see docs/PROGRESS.md 2026-07-30.
-    MATCH_TOP_K: int = 10
-    # How hard to penalise a post pointing the wrong way on the request/offer axis.
-    MATCH_DIRECTION_WEIGHT: float = 1.0
+    VERIFIER_MODEL: str = "gpt-4o-mini"
+    # Watchers per LLM call. Bounds prompt size and, if one call fails, how many watchers are
+    # affected — a post with more candidates than this is split into several calls.
+    MATCH_BATCH_SIZE: int = 15
     MATCH_BACKFILL_INTERVAL_MINUTES: int = 5
     MATCH_BACKFILL_LIMIT: int = 200
 

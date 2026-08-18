@@ -1,8 +1,8 @@
 """Insert fake confirmed matches so the feed UI can be exercised without a live pipeline.
 
-**Development only.** A real match needs the whole chain — ingestion, an `OPENAI_API_KEY` for the
-embedding worker, and an `ANTHROPIC_API_KEY` for the verifier. This script skips all of it and
-writes the end state directly, so the feed can be built and checked before those keys exist.
+**Development only.** A real match needs the whole chain — ingestion, and an `OPENAI_API_KEY` for
+the LLM verifier. This script skips all of it and writes the end state directly, so the feed can
+be built and checked before that key exists.
 
 The rows it writes are indistinguishable from real ones, which is the point and also the risk:
 run it against a database you do not mind polluting. `--clear` removes only what it wrote,
@@ -104,7 +104,6 @@ async def resolve_watcher(session, user: User) -> Watcher:
         name="Seeded watcher",
         intent_text="someone looking to hire a React or Python developer for contract work",
         subreddits=["forhire"],
-        direction="requesting",
     )
     session.add(watcher)
     await session.flush()
@@ -136,11 +135,6 @@ async def seed(session, watcher: Watcher) -> int:
             Match(
                 watcher_id=watcher.id,
                 reddit_post_id=post.id,
-                # Real-looking numbers from the direction experiment: a confirmed request sits
-                # around 0.55-0.65 similarity with a negative direction score.
-                similarity=0.62 - index * 0.02,
-                direction_score=-0.05 - index * 0.01,
-                adjusted_score=0.57 - index * 0.02,
                 llm_verified=True,
                 llm_reason=reason,
                 llm_model="seed-script",

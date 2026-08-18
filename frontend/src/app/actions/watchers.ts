@@ -45,7 +45,6 @@ export async function createWatcherAction(
     name: String(formData.get("name") ?? "").trim(),
     intent_text: String(formData.get("intent_text") ?? "").trim(),
     subreddits: parseSubreddits(String(formData.get("subreddits") ?? "")),
-    direction: String(formData.get("direction") ?? "requesting"),
   };
 
   try {

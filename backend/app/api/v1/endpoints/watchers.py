@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,8 +14,6 @@ from app.models.user import User
 from app.models.watcher import Watcher
 from app.schemas.watcher import WatcherCreate, WatcherRead, WatcherUpdate
 from app.services.limits import LimitExceeded, enforce_limits
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/watchers", tags=["watchers"])
 
@@ -37,23 +34,6 @@ async def _get_owned_watcher(
     return watcher
 
 
-# Ask the embedding worker to (re)embed a watcher's intent text.
-#
-# Non-fatal by design, matching the other queue hand-offs: the embedding worker's backfill sweep
-# picks up any watcher whose `intent_embedding` is NULL, so a failed enqueue costs latency, not
-# correctness.
-async def _enqueue_embed(request: Request, watcher_id: uuid.UUID) -> None:
-    redis = getattr(request.app.state, "redis", None)
-    if redis is None:
-        return
-    try:
-        await redis.enqueue_job(
-            "embed_watcher", str(watcher_id), _job_id=f"embed_watcher:{watcher_id}"
-        )
-    except Exception:
-        logger.exception("watchers: failed enqueueing embed job for %s", watcher_id)
-
-
 @router.get("", response_model=list[WatcherRead])
 async def list_watchers(
     session: AsyncSession = Depends(get_db),
@@ -68,7 +48,6 @@ async def list_watchers(
 @router.post("", response_model=WatcherRead, status_code=status.HTTP_201_CREATED)
 async def create_watcher(
     payload: WatcherCreate,
-    request: Request,
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Watcher:
@@ -82,14 +61,11 @@ async def create_watcher(
         name=payload.name,
         intent_text=payload.intent_text,
         subreddits=payload.subreddits,
-        direction=payload.direction,
         status=payload.status,
     )
     session.add(watcher)
     await session.commit()
     await session.refresh(watcher)
-
-    await _enqueue_embed(request, watcher.id)
     return watcher
 
 
@@ -106,7 +82,6 @@ async def get_watcher(
 async def update_watcher(
     watcher_id: uuid.UUID,
     payload: WatcherUpdate,
-    request: Request,
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Watcher:
@@ -129,26 +104,15 @@ async def update_watcher(
 
     if payload.name is not None:
         watcher.name = payload.name
-    if payload.direction is not None:
-        watcher.direction = payload.direction
     if payload.status is not None:
         watcher.status = payload.status
-
-    # Changing the intent invalidates the stored vector. Clearing it in the same transaction closes
-    # the window where the matcher would otherwise compare posts against the *old* wording: the
-    # matcher only considers watchers with a non-NULL embedding, so it skips this one until the
-    # embedding worker catches up.
-    intent_changed = payload.intent_text is not None and payload.intent_text != watcher.intent_text
-    if intent_changed:
+    # No embedding to invalidate: the verifier reads intent_text fresh on every call, so an edit
+    # takes effect on the very next post the matcher considers.
+    if payload.intent_text is not None:
         watcher.intent_text = payload.intent_text
-        watcher.intent_embedding = None
-        watcher.embedded_at = None
 
     await session.commit()
     await session.refresh(watcher)
-
-    if intent_changed:
-        await _enqueue_embed(request, watcher.id)
     return watcher
 
 
