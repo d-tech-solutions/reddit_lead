@@ -17,7 +17,7 @@ sequenceDiagram
     U->>FE: Create watcher (subreddits + intent text)
     FE->>API: POST /watchers
     API->>API: enforce plan limits (watcher/subreddit count)
-    API->>Pipeline: embed intent_text, store watcher
+    API->>Pipeline: store watcher
     Note over Pipeline: Pipeline now polls this watcher's subreddits
     U->>FE: Link Telegram (optional) / confirm email channel
     Pipeline-->>API: confirmed match found
@@ -39,34 +39,40 @@ sequenceDiagram
     participant R as Reddit API
     participant I as Ingestion Worker
     participant Q as Redis Queue
-    participant E as Embedding Worker
-    participant DB as Postgres+pgvector
-    participant M as Matcher
-    participant L as LLM Verifier
+    participant DB as Postgres
+    participant M as Matcher Worker
+    participant L as LLM Verifier (GPT-4o-mini)
     participant N as Notification Worker
 
     loop poll cycle
         I->>R: fetch new posts (subreddits from active watchers)
         I->>I: dedupe against seen post IDs
-        I->>Q: enqueue new posts
+        I->>DB: store post
+        I->>Q: enqueue match job
         I->>I: emit heartbeat (uptime monitoring)
     end
-    Q->>E: consume post
-    E->>E: generate embedding (title+body)
-    E->>DB: store post + embedding
-    DB->>M: trigger match check
-    M->>DB: similarity search vs active watchers (same subreddit)
-    alt candidate above threshold
-        M->>L: verify intent (needs vs offers)
-        alt confirmed match
-            L->>DB: write match row
-            L->>N: enqueue notification
-            N->>N: send via user's configured channels
-            N->>DB: record delivery status
-        else rejected by LLM
-            L->>DB: discard (no match)
-        end
-    else below threshold
+    Q->>M: consume post
+    M->>DB: find active watchers subscribed to this post's subreddit
+    alt no watchers subscribed
         M->>M: no action
+    else one or more watchers
+        M->>L: batched verification call (post + all candidate watcher intents)
+        L->>M: per-watcher verdict + reasoning
+        loop each verdict
+            M->>DB: write match row (pass or fail, with reasoning)
+            alt confirmed match
+                M->>N: enqueue notification
+                N->>N: send via user's configured channels
+                N->>DB: record delivery status
+            end
+        end
     end
 ```
+
+Notes:
+- One LLM call per post, not one per (post, watcher) pair — the call is batched across every
+  active watcher subscribed to that post's subreddit, and returns a verdict per watcher.
+- Every verdict is written to the matches table, pass or fail — rejected candidates are kept as
+  calibration data, not discarded.
+- Large subreddits (many subscribed watchers) split into multiple batched calls rather than one
+  unbounded call.

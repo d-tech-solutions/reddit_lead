@@ -39,7 +39,7 @@ in near real time when a genuine match appears.
 - **Activation**: a new user creates their first watcher and receives their first real match
   within their first session/day.
 - Early success metric (pre-scale): number of active watchers × user-reported "this was a good
-  match" rate. Formal analytics come later (see [[FEATURES]] feedback loop, post-MVP).
+  match" rate. Formal analytics come later (feedback loop is a post-MVP feature).
 
 ## 5. Non-goals (explicitly out of scope for now)
 
@@ -66,7 +66,7 @@ differentiator is **capacity and channels**, not latency.
 
 Subreddit limits are a **total pool shared across a user's watchers**, not per-watcher (e.g. a
 Standard user could put all 10 subreddits on one watcher, or spread them 3/3/4 across three
-watchers). Standard/Premium dollar pricing is still open — flagged in [[PROGRESS]].
+watchers). Standard/Premium dollar pricing is still open (TBD).
 
 ## 7. Core user flow (MVP)
 
@@ -74,12 +74,12 @@ watchers). Standard/Premium dollar pricing is still open — flagged in [[PROGRE
 2. User creates a **watcher**: picks 1+ subreddits, writes a plain-language description of the
    intent they want to catch (e.g. "someone asking for a WordPress developer to build or fix
    their site").
-3. System embeds the watcher's intent description and stores it.
-4. System continuously ingests new posts from the selected subreddits, embeds them, and checks
-   for similarity against active watchers; candidates go through an LLM intent-verification pass.
-5. On a confirmed match: the post appears in the user's dashboard, and a notification is sent via
+3. System continuously ingests new posts from the selected subreddits. For each new post, every
+   active watcher subscribed to that subreddit is checked directly against the post by an LLM
+   verification call — no separate embedding or similarity-scoring step.
+4. On a confirmed match: the post appears in the user's dashboard, and a notification is sent via
    their configured channel(s).
-6. User clicks through to the Reddit post to respond.
+5. User clicks through to the Reddit post to respond.
 
 Full sequence detail lives in [[WORKFLOW]].
 
@@ -88,18 +88,17 @@ Full sequence detail lives in [[WORKFLOW]].
 - **Reddit API terms & rate limits**: must operate within Reddit's official API (OAuth, ~100 QPM
   class limits) — no scraping workarounds. This bounds how many subreddits/posts we can poll and
   is the reason watchers are scoped to specific subreddits rather than all of Reddit.
-- **Embedding/LLM cost scales with ingestion volume**, not directly with paying users — a small
-  number of watchers on high-traffic subreddits could still generate significant background cost.
-  Needs cost monitoring from day one (see [[ARCHITECTURE]] monitoring section).
-- **False positives erode trust fast** — the two-stage match (embedding retrieval + LLM
-  verification) exists specifically to manage this; matching quality is the core product risk,
-  not a nice-to-have.
-- **Cold-start matching quality**: without the feedback loop (post-MVP), match thresholds are
-  tuned manually/globally rather than per-watcher.
+- **LLM cost scales with ingestion volume**, not directly with paying users — a small number of
+  watchers on high-traffic subreddits could still generate significant background cost, and every
+  post is verified directly against every subscribed watcher (no cheaper pre-filter stage). Needs
+  cost monitoring from day one (see [[ARCHITECTURE]] monitoring section).
+- **False positives erode trust fast** — matching quality is the core product risk, not a
+  nice-to-have. The LLM verification call is the only precision gate, so prompt quality carries
+  the full weight that used to be split across a retrieval stage and a verification stage.
+- **Cold-start matching quality**: without the feedback loop (post-MVP), the verification prompt
+  is tuned manually/globally rather than per-watcher.
 
 ## 9. Related docs
 
-- [[FEATURES]] — full feature breakdown by phase
 - [[ARCHITECTURE]] — technical design, stack, data model, monitoring
 - [[WORKFLOW]] — user and system sequence flows
-- [[PROGRESS]] — current status and open decisions
