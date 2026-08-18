@@ -85,15 +85,35 @@ granted. Do not propose scraping as a workaround (`docs/ARCHITECTURE.md` §8).
 `rebase`, etc. — not even read-only ones like `git status` or `git log`. Version control is handled
 manually. If a task seems to need git, describe the commands and let the user run them.
 
-**Every function gets a one- or two-line comment directly above its definition** — above the
-`def`/`async def` in Python, above the function in TypeScript/JavaScript. Not a docstring or
-JSDoc block inside or below the signature. Say what the function does and why it exists, not a
-restatement of its name.
+**Document with docstrings, not a mandatory comment above every function.** Give a function a
+docstring (Python) or JSDoc block (TypeScript/JavaScript) when it's public API, or its behavior
+isn't obvious from its name and signature — what it does and why it exists, not a restatement of
+the name. Match the docstring's size to the function:
+
+- **Skip it entirely** on small, self-evident functions where it would just repeat the signature.
+- **One line** when a short sentence covers it — most functions that need anything at all land here.
+- **Multi-line with Args/Returns** only for genuinely complex or public-API functions where a single
+  line can't capture the behavior, edge cases, or non-obvious return shape.
+
+Reserve inline `#` comments for a specific line that needs explaining — a workaround, a non-obvious
+invariant, a "why" a reader couldn't otherwise infer — not for describing what a whole function does.
 
 ```python
-# Pull posts from a subreddit newer than `since`, using whichever fetch mode is configured.
-# Returns oldest-first so the ingest cursor advances cleanly.
+# Self-evident — no docstring needed.
+async def get_active_subreddits(session: AsyncSession) -> list[str]:
+    ...
+
+
+async def store_posts(session: AsyncSession, posts: list[dict[str, Any]]) -> list[uuid.UUID]:
+    """Insert posts, skipping ones already stored; returns ids of the newly inserted rows."""
+    ...
+
+
 async def fetch_new_posts(subreddit: str, since: datetime) -> list[RedditPost]:
+    """Pull posts from a subreddit newer than `since`, using whichever fetch mode is configured.
+
+    Returns oldest-first so the ingest cursor advances cleanly.
+    """
     ...
 ```
 

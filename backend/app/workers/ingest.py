@@ -35,7 +35,7 @@ async def get_active_subreddits(session: AsyncSession) -> list[str]:
 
 
 async def store_posts(session: AsyncSession, posts: list[dict[str, Any]]) -> list[uuid.UUID]:
-    """Insert posts, skipping ones already stored. Returns the ids of the newly inserted rows."""
+    """Insert posts, skipping ones already stored; returns ids of the newly inserted rows."""
     if not posts:
         return []
 
@@ -51,10 +51,12 @@ async def store_posts(session: AsyncSession, posts: list[dict[str, Any]]) -> lis
     return inserted
 
 
-# Hand new post ids to the matcher. Deliberately non-fatal: ingestion must not stop because the
-# next stage is unreachable, and the matcher's own backfill sweep catches anything that never
-# made it onto the queue.
 async def enqueue_for_matching(redis: ArqRedis | None, post_ids: list[uuid.UUID]) -> None:
+    """Hand new post ids to the matcher.
+
+    Deliberately non-fatal: ingestion must not stop because the next stage is unreachable, and the
+    matcher's own backfill sweep catches anything that never made it onto the queue.
+    """
     if redis is None or not post_ids:
         return
 
@@ -69,6 +71,8 @@ async def enqueue_for_matching(redis: ArqRedis | None, post_ids: list[uuid.UUID]
 async def poll_once(
     session: AsyncSession, source: PostSource, redis: ArqRedis | None = None
 ) -> int:
+    """Run one full poll cycle: fetch every active subreddit, store what's new, and enqueue it for
+    matching. Returns the total number of new posts stored."""
     subreddits = await get_active_subreddits(session)
     if not subreddits:
         logger.info("ingest cycle: no active watchers, nothing to poll")
@@ -93,6 +97,8 @@ async def poll_once(
 
 
 async def main() -> None:
+    """Process entry point: build the configured post source, connect to Redis, then loop
+    `poll_once` forever on `REDDIT_POLL_INTERVAL_SECONDS`, cleaning up both on exit."""
     settings = get_settings()
     logging.basicConfig(
         level=settings.LOG_LEVEL,

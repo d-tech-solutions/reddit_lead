@@ -103,14 +103,16 @@ class Verdict:
 class IntentVerifier(Protocol):
     async def verify_batch(
         self, post_title: str, post_body: str, candidates: list[tuple[UUID, str]]
-    ) -> list[Verdict]: ...
+    ) -> list[Verdict]:
+        """Return one verdict per candidate; raise on failure rather than guessing."""
+        ...
 
     async def close(self) -> None: ...
 
 
-# Assemble the user turn: the post, then every candidate numbered so the model's reply maps back
-# to a watcher_id in code rather than asking it to echo a UUID verbatim.
 def build_prompt(post_title: str, post_body: str, candidates: list[tuple[UUID, str]]) -> str:
+    """Assemble the user turn: the post, then every candidate numbered so the model's reply maps
+    back to a watcher_id in code rather than asking it to echo a UUID verbatim."""
     post = f"{post_title}\n\n{post_body}".strip() if post_body.strip() else post_title.strip()
     numbered = "\n\n".join(
         f"Candidate {index}: {intent_text[:MAX_INTENT_CHARS]}"
@@ -122,13 +124,15 @@ def build_prompt(post_title: str, post_body: str, candidates: list[tuple[UUID, s
     )
 
 
-# Turn the model's numbered verdicts back into Verdict rows keyed by watcher_id. A candidate
-# number outside the batch, or one the model skipped entirely, is logged and left out — the
-# caller's match row for that candidate stays NULL for the backfill sweep to retry, rather than
-# guessing at a verdict the model never actually gave.
 def apply_candidate_numbers(
     raw_verdicts: list[dict[str, Any]], candidates: list[tuple[UUID, str]], model: str
 ) -> list[Verdict]:
+    """Turn the model's numbered verdicts back into Verdict rows keyed by watcher_id.
+
+    A candidate number outside the batch, or one the model skipped entirely, is logged and left
+    out — the caller's match row for that candidate stays NULL for the backfill sweep to retry,
+    rather than guessing at a verdict the model never actually gave.
+    """
     verdicts: list[Verdict] = []
     for entry in raw_verdicts:
         number = entry.get("candidate_number")
@@ -156,12 +160,14 @@ class OpenAIIntentVerifier:
         self._client = AsyncOpenAI(api_key=api_key)
         self._model = model
 
-    # Ask the model for one verdict per candidate watcher against one post.
-    # Raises on API failure or a refusal so the caller leaves those match rows NULL and the sweep
-    # retries them.
     async def verify_batch(
         self, post_title: str, post_body: str, candidates: list[tuple[UUID, str]]
     ) -> list[Verdict]:
+        """Ask the model for one verdict per candidate watcher against one post.
+
+        Raises on API failure or a refusal so the caller leaves those match rows NULL and the
+        sweep retries them.
+        """
         if not candidates:
             return []
 
@@ -192,9 +198,12 @@ class OpenAIIntentVerifier:
         await self._client.close()
 
 
-# Log tokens and estimated cost per batch call. GPT-4o-mini: $0.15 per million input tokens, $0.60
-# per million output — update these if the model or its published rate changes.
 def _log_usage(model: str, usage: Any) -> None:
+    """Log tokens and estimated cost per batch call.
+
+    GPT-4o-mini: $0.15 per million input tokens, $0.60 per million output — update these if the
+    model or its published rate changes.
+    """
     if usage is None:
         return
     cost = (usage.prompt_tokens * 0.15 + usage.completion_tokens * 0.60) / 1_000_000
@@ -207,9 +216,9 @@ def _log_usage(model: str, usage: Any) -> None:
     )
 
 
-# Construct the verifier, failing at startup with an actionable message when the key is missing
-# rather than on the first batch.
 def build_verifier(api_key: str, model: str) -> IntentVerifier:
+    """Construct the verifier, failing fast with an actionable message when the key is missing
+    rather than on the first batch."""
     if not api_key:
         raise ValueError(
             "OPENAI_API_KEY is required to run the matcher. "

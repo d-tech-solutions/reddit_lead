@@ -33,9 +33,11 @@ from app.workers.verifier import IntentVerifier, Verdict, build_verifier
 logger = logging.getLogger(__name__)
 
 
-# Load the active watchers that cover this post's subreddit. Filtering in SQL keeps the candidate
-# set small before anything is sent to the LLM.
 async def fetch_candidate_watchers(session: AsyncSession, subreddit: str) -> list[Watcher]:
+    """Load active watchers whose subreddit list covers this post.
+
+    Filtering in SQL keeps the candidate set small before anything is sent to the LLM.
+    """
     result = await session.execute(
         select(Watcher).where(
             Watcher.status == "active",
@@ -45,17 +47,19 @@ async def fetch_candidate_watchers(session: AsyncSession, subreddit: str) -> lis
     return list(result.scalars())
 
 
-# Split candidates into fixed-size groups so one busy subreddit doesn't become one oversized call.
 def chunk_watchers(watchers: list[Watcher], batch_size: int) -> list[list[Watcher]]:
+    """Split candidates into fixed-size groups so one busy subreddit isn't one oversized call."""
     return [watchers[index : index + batch_size] for index in range(0, len(watchers), batch_size)]
 
 
-# Write one placeholder row per (watcher, post), skipping pairs already recorded. `llm_verified`
-# stays NULL until a verdict is applied — a job that dies mid-batch leaves a clean trail the
-# backfill sweep already knows how to find, with the same partial index as before.
 async def store_placeholder_matches(
     session: AsyncSession, post_id: UUID, watcher_ids: list[UUID]
 ) -> list[UUID]:
+    """Write one placeholder row per (watcher, post), skipping pairs already recorded.
+
+    `llm_verified` stays NULL until a verdict is applied — a job that dies mid-batch leaves a clean
+    trail the backfill sweep already knows how to find.
+    """
     if not watcher_ids:
         return []
 
@@ -72,9 +76,11 @@ async def store_placeholder_matches(
     return inserted
 
 
-# Write a batch of verdicts back onto their match rows, one commit for the whole batch. Skips a
-# verdict whose row is missing or already judged, so a retried batch is idempotent.
 async def apply_verdicts(session: AsyncSession, post_id: UUID, verdicts: list[Verdict]) -> int:
+    """Write a batch of verdicts onto their match rows, one commit for the whole batch.
+
+    Skips a verdict whose row is missing or already judged, so a retried batch is idempotent.
+    """
     if not verdicts:
         return 0
 
@@ -103,14 +109,17 @@ async def apply_verdicts(session: AsyncSession, post_id: UUID, verdicts: list[Ve
     return confirmed
 
 
-# Ask the verifier about one chunk of candidates and apply the verdicts. A failed chunk is logged
-# and left NULL — the backfill sweep retries it — rather than failing the whole post.
 async def _verify_and_apply(
     session: AsyncSession,
     verifier: IntentVerifier,
     post: RedditPost,
     watchers: list[Watcher],
 ) -> int:
+    """Ask the verifier about one chunk of candidates and apply the verdicts.
+
+    A failed chunk is logged and left NULL — the backfill sweep retries it — rather than failing
+    the whole post.
+    """
     candidates = [(watcher.id, watcher.intent_text) for watcher in watchers]
     try:
         verdicts = await verifier.verify_batch(post.title, post.body or "", candidates)
@@ -133,9 +142,11 @@ async def _verify_and_apply(
     return confirmed
 
 
-# Arq job: judge one post against every active watcher subscribed to its subreddit.
-# Enqueued by the ingestion worker the moment a post is inserted.
 async def match_post(ctx: dict[str, Any], post_id: str) -> int:
+    """Arq job: judge one post against every active watcher subscribed to its subreddit.
+
+    Enqueued by the ingestion worker the moment a post is inserted.
+    """
     verifier: IntentVerifier = ctx["verifier"]
     settings = ctx["settings"]
 
@@ -158,9 +169,8 @@ async def match_post(ctx: dict[str, Any], post_id: str) -> int:
     return confirmed
 
 
-# Load candidate rows that no verdict has been recorded for, oldest first, grouped by post so each
-# group can go through the verifier in one batched call.
 async def fetch_unverified_by_post(session: AsyncSession, limit: int) -> dict[UUID, list[UUID]]:
+    """Load unverified candidate rows, oldest first, grouped by post for one batched call each."""
     result = await session.execute(
         select(Match.reddit_post_id, Match.watcher_id)
         .where(Match.llm_verified.is_(None))
@@ -173,11 +183,13 @@ async def fetch_unverified_by_post(session: AsyncSession, limit: int) -> dict[UU
     return grouped
 
 
-# Load posts that have no `matches` row at all — the ones a `match_post` job never ran for
-# (enqueue failure, or a job that exhausted its retries). A post in a subreddit nobody watches
-# produces no candidates and so is re-checked every sweep; that is cheap and also correct, since a
-# watcher added later should still pick it up.
 async def fetch_unmatched_posts(session: AsyncSession, limit: int) -> list[RedditPost]:
+    """Load posts with no `matches` row at all — ones a `match_post` job never ran for (enqueue
+    failure, or a job that exhausted its retries).
+
+    A post in a subreddit nobody watches produces no candidates and so is re-checked every sweep;
+    that's cheap and also correct, since a watcher added later should still pick it up.
+    """
     has_matches = select(Match.reddit_post_id).where(Match.reddit_post_id == RedditPost.id)
     result = await session.execute(
         select(RedditPost)
@@ -188,8 +200,9 @@ async def fetch_unmatched_posts(session: AsyncSession, limit: int) -> list[Reddi
     return list(result.scalars())
 
 
-# Arq cron job: catch candidates whose verification never completed, and posts no job ever ran for.
 async def backfill(ctx: dict[str, Any]) -> int:
+    """Arq cron job: catch candidates whose verification never completed, and posts no job ever
+    ran for."""
     verifier: IntentVerifier = ctx["verifier"]
     settings = ctx["settings"]
 
@@ -226,16 +239,16 @@ async def backfill(ctx: dict[str, Any]) -> int:
     return handled
 
 
-# Turn a "run every N minutes" setting into the minute set Arq's cron helper expects.
 def backfill_minutes(interval_minutes: int) -> set[int]:
+    """Turn a "run every N minutes" setting into the minute set Arq's cron helper expects."""
     interval = max(1, min(60, interval_minutes))
     while 60 % interval != 0:
         interval -= 1
     return {minute for minute in range(60) if minute % interval == 0}
 
 
-# Arq startup hook: build the verifier once per worker process rather than per job.
 async def startup(ctx: dict[str, Any]) -> None:
+    """Arq startup hook: build the verifier once per worker process rather than per job."""
     settings = get_settings()
     logging.basicConfig(
         level=settings.LOG_LEVEL,
@@ -252,8 +265,8 @@ async def startup(ctx: dict[str, Any]) -> None:
     )
 
 
-# Arq shutdown hook: close the verifier's HTTP client so the process exits cleanly.
 async def shutdown(ctx: dict[str, Any]) -> None:
+    """Arq shutdown hook: close the verifier's HTTP client so the process exits cleanly."""
     verifier = ctx.get("verifier")
     if verifier is not None:
         await verifier.close()
