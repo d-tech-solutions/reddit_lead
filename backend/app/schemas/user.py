@@ -23,6 +23,7 @@ class UserRead(BaseModel):
     id: uuid.UUID
     email: str | None
     plan: str
+    is_superadmin: bool
     created_at: datetime
 
 

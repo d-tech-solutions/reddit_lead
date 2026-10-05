@@ -19,7 +19,6 @@ documented tradeoff as migration d4a9c2e71f38 — there is nothing to migrate th
 """
 from typing import Sequence, Union
 
-import pgvector.sqlalchemy
 import sqlalchemy as sa
 from alembic import op
 
@@ -48,6 +47,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Imported lazily, same reasoning as b7e1f3c9d024: alembic loads every migration file to build
+    # the revision graph regardless of whether it runs, and `pgvector` isn't an installed
+    # dependency now that nothing uses the vector columns it types.
+    import pgvector.sqlalchemy
+
     # Nullable on the way back in: the dropped values cannot be reconstructed, so there is nothing
     # to backfill a NOT NULL default from.
     op.add_column('matches', sa.Column('adjusted_score', sa.Float(), nullable=True))

@@ -7,7 +7,6 @@ Create Date: 2026-07-30 00:00:00.000000
 """
 from typing import Sequence, Union
 
-import pgvector.sqlalchemy
 import sqlalchemy as sa
 from alembic import op
 
@@ -21,6 +20,12 @@ EMBEDDING_DIMENSIONS = 1536
 
 
 def upgrade() -> None:
+    # Imported lazily: alembic loads every migration file to build the revision graph, even when
+    # not running this one, and `pgvector` is no longer an installed dependency now that the
+    # embedding columns this migration adds have themselves been removed downstream (see
+    # f6b1e4a92c73). A top-level import broke every alembic command on a fresh install.
+    import pgvector.sqlalchemy
+
     op.add_column(
         'reddit_posts',
         sa.Column('embedding', pgvector.sqlalchemy.Vector(EMBEDDING_DIMENSIONS), nullable=True),

@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useEffect, useRef } from "react";
+import Link from "next/link";
 
 import { createWatcherAction, type ActionState } from "@/app/actions/watchers";
 import { Button } from "@/components/ui/button";
@@ -12,7 +13,7 @@ const INITIAL: ActionState = { error: null };
 
 // The create-watcher form. Client-side only for the pending state and the reset-on-success —
 // the submission itself is a Server Action, so this works before hydration too.
-export function WatcherForm() {
+export function WatcherForm({ onSuccess }: { onSuccess?: () => void } = {}) {
   const [state, action, pending] = useActionState(createWatcherAction, INITIAL);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -21,7 +22,9 @@ export function WatcherForm() {
   useEffect(() => {
     if (state.ok) {
       formRef.current?.reset();
+      onSuccess?.();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.ok]);
 
   return (
@@ -74,6 +77,15 @@ export function WatcherForm() {
           className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
           {state.error}
+          {state.status === 409 ? (
+            <>
+              {" "}
+              <Link href="/settings" className="underline">
+                Upgrade your plan
+              </Link>
+              .
+            </>
+          ) : null}
         </p>
       ) : null}
 

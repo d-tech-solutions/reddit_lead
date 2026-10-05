@@ -44,6 +44,12 @@ services:
       BACKEND_CORS_ORIGINS: http://localhost:3000
       CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
       CLERK_AUTHORIZED_PARTIES: ${CLERK_AUTHORIZED_PARTIES:-http://localhost:3000}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_STANDARD: ${STRIPE_PRICE_STANDARD:-}
+      STRIPE_PRICE_PREMIUM: ${STRIPE_PRICE_PREMIUM:-}
+      STRIPE_PRICE_ENTERPRISE: ${STRIPE_PRICE_ENTERPRISE:-}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
     volumes:
       - ./backend/app:/app/app
       # Dev-only helpers (seed_matches.py). Mounted rather than baked into the image so they never

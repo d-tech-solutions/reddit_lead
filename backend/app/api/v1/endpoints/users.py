@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.config import Settings, get_settings
 from app.core.constants import limits_for_plan
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.user import MeRead, UsageRead, UserRead
+from app.services.account import delete_account
 from app.services.limits import usage_for_user
 from app.services.matches import unread_count
 
@@ -37,3 +39,14 @@ async def read_me(
         ),
         unread_matches=unread,
     )
+
+
+# Permanently delete the caller's account: cancels billing, deletes the Clerk identity, and
+# removes every row of theirs (watchers, matches, notification channels, subscription history).
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_me(
+    session: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    user: User = Depends(get_current_user),
+) -> None:
+    await delete_account(session, settings, user)

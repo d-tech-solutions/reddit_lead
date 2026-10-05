@@ -37,6 +37,15 @@ class Settings(BaseSettings):
     # acceptable locally, not in production.
     CLERK_AUTHORIZED_PARTIES: str = ""
 
+    # Billing (Stripe). Checkout/portal redirect back to FRONTEND_URL; the webhook is verified
+    # against STRIPE_WEBHOOK_SECRET rather than authenticated like the rest of the API.
+    STRIPE_SECRET_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+    STRIPE_PRICE_STANDARD: str = ""
+    STRIPE_PRICE_PREMIUM: str = ""
+    STRIPE_PRICE_ENTERPRISE: str = ""
+    FRONTEND_URL: str = "http://localhost:3000"
+
     @property
     def clerk_authorized_parties(self) -> list[str]:
         return [

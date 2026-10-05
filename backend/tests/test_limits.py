@@ -10,18 +10,12 @@ def test_every_tier_in_the_prd_is_present():
 
 @pytest.mark.parametrize(
     ("plan", "watchers", "subreddits"),
-    [("free", 1, 3), ("standard", 3, 10), ("premium", 10, 50)],
+    [("free", 1, 3), ("standard", 3, 10), ("premium", 10, 50), ("enterprise", 25, 150)],
 )
 def test_tier_numbers_match_the_prd(plan, watchers, subreddits):
     limit = limits_for_plan(plan)
     assert limit.max_watchers == watchers
     assert limit.max_subreddits == subreddits
-
-
-def test_enterprise_is_unbounded():
-    limit = limits_for_plan("enterprise")
-    assert limit.max_watchers is None
-    assert limit.max_subreddits is None
 
 
 def test_unknown_plan_falls_back_to_free():
@@ -69,13 +63,24 @@ def test_edit_still_respects_the_subreddit_pool():
         )
 
 
-def test_enterprise_bypasses_both_limits():
+def test_enterprise_allows_up_to_its_own_cap():
+    # Enterprise is a real, capped Stripe price now (not "contact sales"/unbounded) — see PRD §6.
     check_limits(
         "enterprise",
-        Usage(watchers=999, subreddits=9999),
-        new_subreddit_count=500,
+        Usage(watchers=24, subreddits=140),
+        new_subreddit_count=10,
         adding_watcher=True,
     )
+
+
+def test_enterprise_still_enforces_its_cap():
+    with pytest.raises(LimitExceeded, match="25 watchers"):
+        check_limits(
+            "enterprise",
+            Usage(watchers=25, subreddits=100),
+            new_subreddit_count=1,
+            adding_watcher=True,
+        )
 
 
 def test_limit_message_names_the_limit_and_current_usage():

@@ -18,6 +18,9 @@ async function requireSignedIn(): Promise<void> {
 
 export interface ActionState {
   error: string | null;
+  // The failed request's HTTP status, so the form can offer an upgrade link specifically for a
+  // plan-limit 409 rather than every error.
+  status?: number;
   // Bumped on success so a client form can tell "worked" from "first render".
   ok?: boolean;
 }
@@ -31,7 +34,7 @@ function parseSubreddits(raw: string): string[] {
     .filter(Boolean);
 }
 
-// Create a watcher from the dashboard form.
+// Create a watcher from the watchers page's form.
 //
 // Returns the error as state rather than throwing, so a plan-limit 409 renders next to the form
 // instead of blowing up into an error boundary — hitting your tier limit is normal, not a fault.
@@ -54,7 +57,7 @@ export async function createWatcherAction(
     });
   } catch (error) {
     if (error instanceof ApiError) {
-      return { error: error.message };
+      return { error: error.message, status: error.status };
     }
     throw error;
   }

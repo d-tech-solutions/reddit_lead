@@ -131,4 +131,17 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    return await get_or_create_user(session, clerk_user_id, email_from_claims(claims))
+    user = await get_or_create_user(session, clerk_user_id, email_from_claims(claims))
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This account has been deactivated.",
+        )
+    return user
+
+
+# Gate for the /admin API — everything a normal user can do, plus this.
+async def require_superadmin(user: User = Depends(get_current_user)) -> User:
+    if not user.is_superadmin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return user

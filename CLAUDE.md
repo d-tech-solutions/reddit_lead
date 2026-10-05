@@ -4,7 +4,8 @@ Reddit intent-alert SaaS: users create "watchers" (subreddits + a plain-language
 the kind of request they want to catch), and the app notifies them when a matching post appears.
 
 **Status**: ingestion and matcher/LLM-verifier workers built. Auth (Clerk) + watcher CRUD built end
-to end, API and UI. Match feed built end to end (API + UI). Notification worker not started.
+to end, API and UI. Match feed built end to end (API + UI). Billing (Stripe checkout/portal/webhook)
+built end to end, API and UI. Notification worker not started.
 
 ## Start here
 
@@ -15,7 +16,9 @@ Before making any product or architecture decision, read `/docs`:
 - `docs/WORKFLOW.md` — user and system sequence flows
 - `docs/ingestion-worker/`, `docs/matcher/`, `docs/auth-and-watchers/`, `docs/watcher-ui/`,
   `docs/match-feed/` — code-level walkthroughs. Each built component gets its own
-  `docs/<component-name>/` folder.
+  `docs/<component-name>/` folder. (In practice the worker walkthroughs live under
+  `docs/backend/worker/` instead — see `docs/backend/billing.md` for the same treatment of
+  billing: Stripe checkout/portal/webhook, and the `users.plan` vs `subscriptions` split.)
 
 ## Locked decisions (see docs/PROGRESS.md for the full list)
 
@@ -61,6 +64,10 @@ prefix docker commands with `MSYS_NO_PATHCONV=1` or `-w /w` is rewritten to `W:/
 
 Dev-only helper: `docker compose exec api python -m scripts.seed_matches --email you@example.com`
 writes fake confirmed matches so the feed UI works without live API keys (`--clear` removes them).
+
+Billing needs a reachable webhook URL even locally — run the Stripe CLI alongside the stack:
+`stripe listen --forward-to localhost:8000/api/v1/billing/webhook`, then put the signing secret it
+prints in `STRIPE_WEBHOOK_SECRET`. See `docs/backend/billing.md`.
 
 Frontend (`/frontend`, uses **npm**): `npm run dev` / `npm run lint` / `npm run build`.
 

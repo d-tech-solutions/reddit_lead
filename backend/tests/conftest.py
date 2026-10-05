@@ -88,6 +88,39 @@ async def db_user(db_session: AsyncSession) -> User:
 
 
 @pytest.fixture
+async def db_admin_user(db_session: AsyncSession) -> User:
+    user = User(
+        clerk_user_id=f"user_test_{uuid.uuid4().hex[:12]}",
+        email="admin@example.com",
+        is_superadmin=True,
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+    return user
+
+
+@pytest.fixture
+async def admin_client(db_session: AsyncSession, db_admin_user: User) -> AsyncClient:
+    """An API client authenticated as `db_admin_user` — same shape as `auth_client`."""
+
+    async def override_db():
+        yield db_session
+
+    async def override_user():
+        return db_admin_user
+
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_user] = override_user
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.fixture
 async def auth_client(db_session: AsyncSession, db_user: User) -> AsyncClient:
     """An API client authenticated as `db_user`, sharing the test's rolled-back transaction.
 

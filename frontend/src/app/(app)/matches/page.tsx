@@ -1,6 +1,4 @@
 import Link from "next/link";
-import { auth } from "@clerk/nextjs/server";
-import { UserButton } from "@clerk/nextjs";
 
 import { MatchFeed } from "@/components/match-feed";
 import { buttonVariants } from "@/components/ui/button";
@@ -12,14 +10,18 @@ import type { MatchPage, Watcher } from "@/lib/types";
 //
 // The watchers are not decoration: an empty feed means different things depending on whether the
 // user has any watchers, whether all of them are paused, or whether they are active and nothing
-// has matched yet. Answering that needs both payloads.
-async function loadFeed(): Promise<
+// has matched yet. Answering that needs both payloads. `watcherId` narrows the feed query itself —
+// the API scopes it to the caller's watchers regardless, so this is purely "which one".
+async function loadFeed(
+  watcherId: string | null,
+): Promise<
   | { ok: true; page: MatchPage; watchers: Watcher[] }
   | { ok: false; status: number | null; message: string }
 > {
   try {
+    const query = watcherId ? `?${new URLSearchParams({ watcher_id: watcherId }).toString()}` : "";
     const [page, watchers] = await Promise.all([
-      apiFetch<MatchPage>("/matches"),
+      apiFetch<MatchPage>(`/matches${query}`),
       apiFetch<Watcher[]>("/watchers"),
     ]);
     return { ok: true, page, watchers };
@@ -35,11 +37,12 @@ async function loadFeed(): Promise<
   }
 }
 
-// Explain an empty feed honestly.
+// Explain an empty, unfiltered feed honestly.
 //
 // One generic "no matches" message is the wrong answer here: the pipeline takes minutes to reach
 // a new watcher, and a user who cannot tell "still warming up" from "working, nothing yet" will
-// read both as broken.
+// read both as broken. A feed that's empty only because of the watch/date filters is handled
+// inside MatchFeed instead, since changing the filter is the fix and this component doesn't see it.
 function EmptyState({ watchers }: { watchers: Watcher[] }) {
   if (watchers.length === 0) {
     return (
@@ -50,7 +53,7 @@ function EmptyState({ watchers }: { watchers: Watcher[] }) {
         <CardContent className="grid gap-4 text-sm text-muted-foreground">
           <p>Matches show up here once you tell PostPing what to watch for.</p>
           <div>
-            <Link href="/dashboard" className={buttonVariants({ size: "sm" })}>
+            <Link href="/watchers" className={buttonVariants({ size: "sm" })}>
               Create a watcher
             </Link>
           </div>
@@ -69,7 +72,7 @@ function EmptyState({ watchers }: { watchers: Watcher[] }) {
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
           Paused watchers do not look at new posts. Resume one on the{" "}
-          <Link href="/dashboard" className="underline">
+          <Link href="/watchers" className="underline">
             watchers page
           </Link>{" "}
           to start catching matches again.
@@ -92,27 +95,21 @@ function EmptyState({ watchers }: { watchers: Watcher[] }) {
   );
 }
 
-export default async function MatchesPage() {
-  const { isAuthenticated, redirectToSignIn } = await auth();
-  if (!isAuthenticated) return redirectToSignIn();
-
-  const result = await loadFeed();
+export default async function MatchesPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ watcher_id?: string }>;
+}) {
+  const { watcher_id: watcherId } = await searchParams;
+  const result = await loadFeed(watcherId ?? null);
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 p-8">
-      <header className="flex items-center justify-between">
-        <div className="grid gap-1">
-          <h1 className="text-2xl font-semibold">Matches</h1>
-          <p className="text-sm text-muted-foreground">
-            Posts your watchers caught, newest first.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Link href="/dashboard" className={buttonVariants({ variant: "ghost", size: "sm" })}>
-            Watchers
-          </Link>
-          <UserButton />
-        </div>
+    <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-6 p-8">
+      <header className="grid gap-1">
+        <h1 className="text-2xl font-semibold">Matches Feed</h1>
+        <p className="text-sm text-muted-foreground">
+          Posts your watchers caught, newest first.
+        </p>
       </header>
 
       {!result.ok ? (
@@ -130,13 +127,15 @@ export default async function MatchesPage() {
             </p>
           </CardContent>
         </Card>
-      ) : result.page.items.length === 0 ? (
+      ) : result.page.items.length === 0 && !watcherId ? (
         <EmptyState watchers={result.watchers} />
       ) : (
         <MatchFeed
           initialItems={result.page.items}
           initialCursor={result.page.next_cursor}
           initialUnread={result.page.unread}
+          watchers={result.watchers}
+          selectedWatcherId={watcherId ?? null}
         />
       )}
     </div>

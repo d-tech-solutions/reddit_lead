@@ -57,16 +57,19 @@ differentiator is **capacity and channels**, not latency.
 
 | | Free | Standard | Premium | Enterprise |
 |---|---|---|---|---|
-| Watchers | 1 | 3 | 10 | Custom |
-| Subreddits (total across watchers) | 3 | 10 | 50 | Custom |
-| Notification channels | Email only | Email + Telegram | Email + Telegram | Custom |
+| Watchers | 1 | 3 | 10 | 25 |
+| Subreddits (total across watchers) | 3 | 10 | 50 | 150 |
+| Notification channels | Email only | Email + Telegram | Email + Telegram | Email + Telegram |
 | Match history / dashboard | Yes | Yes | Yes | Yes |
 | Matching speed | Same across all tiers | Same across all tiers | Same across all tiers | Same across all tiers |
-| Price | $0 | TBD | TBD | Contact sales |
+| Price / month | $0 | $9 | $29 | $49 |
 
 Subreddit limits are a **total pool shared across a user's watchers**, not per-watcher (e.g. a
 Standard user could put all 10 subreddits on one watcher, or spread them 3/3/4 across three
-watchers). Standard/Premium dollar pricing is still open (TBD).
+watchers). Enterprise is self-serve (a fixed Stripe price, not "contact sales") — its limits are
+capped rather than unbounded so a single $49/mo account can't drive unbounded LLM/ingestion cost.
+Billing is monthly only at launch; no annual plan yet. See [[billing]] for the implementation
+plan.
 
 ## 7. Core user flow (MVP)
 
