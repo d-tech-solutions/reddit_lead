@@ -20,7 +20,9 @@ async def test_get_creates_the_default_email_channel(auth_client, db_session, db
     body = response.json()
     assert body["account_email"] == db_user.email
     assert body["notification_email"] is None
-    assert body["channels"] == [{"channel_type": "email", "enabled": True, "verified": True}]
+    assert body["channels"] == [
+        {"channel_type": "email", "enabled": True, "verified": True, "link_pending": False}
+    ]
 
     result = await db_session.execute(
         select(NotificationChannel).where(NotificationChannel.user_id == db_user.id)

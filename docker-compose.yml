@@ -50,6 +50,13 @@ services:
       STRIPE_PRICE_PREMIUM: ${STRIPE_PRICE_PREMIUM:-}
       STRIPE_PRICE_ENTERPRISE: ${STRIPE_PRICE_ENTERPRISE:-}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      # Used by "Send test" and Slack connect, which deliver from the API process.
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      NOTIFY_FROM_EMAIL: ${NOTIFY_FROM_EMAIL:-PostPing <onboarding@resend.dev>}
+      NOTIFY_ENCRYPTION_KEY: ${NOTIFY_ENCRYPTION_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
     volumes:
       - ./backend/app:/app/app
       # Dev-only helpers (seed_matches.py). Mounted rather than baked into the image so they never
@@ -106,6 +113,31 @@ services:
     volumes:
       - ./backend/app:/app/app
     command: arq app.workers.match.WorkerSettings
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-notify:
+    build:
+      context: ./backend
+    environment:
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postping}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      NOTIFY_FROM_EMAIL: ${NOTIFY_FROM_EMAIL:-PostPing <onboarding@resend.dev>}
+      NOTIFY_ENCRYPTION_KEY: ${NOTIFY_ENCRYPTION_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      NOTIFY_MAX_ATTEMPTS: ${NOTIFY_MAX_ATTEMPTS:-4}
+      NOTIFY_BACKFILL_INTERVAL_MINUTES: ${NOTIFY_BACKFILL_INTERVAL_MINUTES:-5}
+      NOTIFY_BACKFILL_WINDOW_HOURS: ${NOTIFY_BACKFILL_WINDOW_HOURS:-6}
+    volumes:
+      - ./backend/app:/app/app
+    command: arq app.workers.notify.WorkerSettings
     depends_on:
       postgres:
         condition: service_healthy

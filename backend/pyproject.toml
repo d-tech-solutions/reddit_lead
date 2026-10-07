@@ -17,6 +17,7 @@ dependencies = [
     "openai>=1.55",
     "clerk-backend-api>=6.0",
     "stripe>=11.0",
+    "cryptography>=43",
 ]
 
 [dependency-groups]

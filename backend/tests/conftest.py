@@ -1,4 +1,5 @@
 import uuid
+from contextlib import asynccontextmanager
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -182,3 +183,22 @@ class FakeVerifier:
 @pytest.fixture
 def fake_verifier() -> FakeVerifier:
     return FakeVerifier()
+
+
+@asynccontextmanager
+async def _reuse_session(session: AsyncSession):
+    yield session
+
+
+@pytest.fixture
+def use_test_session(db_session, monkeypatch):
+    """Point the notify and match workers at the test's rolled-back transaction.
+
+    Each job opens its own session via `async_session_factory()`; this swaps that for the test's
+    session so their commits stay inside the transaction.
+    """
+    from app.workers import match as match_worker
+    from app.workers import notify
+
+    monkeypatch.setattr(notify, "async_session_factory", lambda: _reuse_session(db_session))
+    monkeypatch.setattr(match_worker, "async_session_factory", lambda: _reuse_session(db_session))

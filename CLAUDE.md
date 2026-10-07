@@ -5,7 +5,7 @@ the kind of request they want to catch), and the app notifies them when a matchi
 
 **Status**: ingestion and matcher/LLM-verifier workers built. Auth (Clerk) + watcher CRUD built end
 to end, API and UI. Match feed built end to end (API + UI). Billing (Stripe checkout/portal/webhook)
-built end to end, API and UI. Notification worker not started.
+built end to end, API and UI. Notification worker built for email (Resend), Slack (pasted webhook) and Telegram (paid plans, bot webhook).
 
 ## Start here
 
@@ -42,6 +42,7 @@ uv run alembic revision --autogenerate -m "..."
 uv run uvicorn app.main:app --reload
 python -m app.workers.ingest              # ingestion worker (own process, interval loop)
 arq app.workers.match.WorkerSettings      # matcher + LLM verifier (Arq consumer)
+arq app.workers.notify.WorkerSettings     # notification delivery (Arq consumer)
 ```
 
 **On this machine none of those backend commands run on the host.** A Windows Application Control
@@ -64,6 +65,9 @@ prefix docker commands with `MSYS_NO_PATHCONV=1` or `-w /w` is rewritten to `W:/
 
 Dev-only helper: `docker compose exec api python -m scripts.seed_matches --email you@example.com`
 writes fake confirmed matches so the feed UI works without live API keys (`--clear` removes them).
+
+Telegram connect needs the same: a public https URL registered with
+`python -m scripts.set_telegram_webhook <url>` (see `docs/backend/worker/notify.md`).
 
 Billing needs a reachable webhook URL even locally — run the Stripe CLI alongside the stack:
 `stripe listen --forward-to localhost:8000/api/v1/billing/webhook`, then put the signing secret it
