@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
+from app.core.config import MATCH_QUEUE, get_settings
 from app.db.session import async_session_factory
 from app.models.reddit_post import RedditPost
 from app.models.watcher import Watcher
@@ -63,7 +63,12 @@ async def enqueue_for_matching(redis: ArqRedis | None, post_ids: list[uuid.UUID]
     for post_id in post_ids:
         try:
             # A job id derived from the post id makes a duplicate enqueue a no-op.
-            await redis.enqueue_job("match_post", str(post_id), _job_id=f"match_post:{post_id}")
+            await redis.enqueue_job(
+                "match_post",
+                str(post_id),
+                _job_id=f"match_post:{post_id}",
+                _queue_name=MATCH_QUEUE,
+            )
         except Exception:
             logger.exception("ingest: failed enqueueing match job for post %s", post_id)
 

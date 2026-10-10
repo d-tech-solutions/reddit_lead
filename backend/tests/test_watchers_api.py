@@ -246,3 +246,49 @@ async def test_me_on_a_fresh_account_reports_zero_usage(auth_client):
 
     assert response.status_code == 200
     assert response.json()["usage"]["watchers_used"] == 0
+
+
+# --- catch-up enqueue (the hour of posts before the watcher existed) ---------------------------
+
+
+async def test_create_enqueues_a_catchup_from_the_watchers_creation_time(
+    auth_client, no_catchup_enqueue
+):
+    response = await auth_client.post("/api/v1/watchers", json=payload(subreddits=["forhire", "python"]))
+
+    [(watcher_id, subreddits, until)] = no_catchup_enqueue
+    body = response.json()
+    assert str(watcher_id) == body["id"]
+    assert subreddits == ["forhire", "python"]
+    # The look-back window ends exactly where the normal queue's eligibility begins.
+    assert until.isoformat().startswith(body["created_at"][:19])
+
+
+async def test_creating_a_paused_watcher_does_not_enqueue_a_catchup(auth_client, no_catchup_enqueue):
+    await auth_client.post("/api/v1/watchers", json=payload(status="paused"))
+
+    assert no_catchup_enqueue == []
+
+
+async def test_patch_enqueues_a_catchup_for_only_the_added_subreddits(
+    auth_client, no_catchup_enqueue
+):
+    created = (await auth_client.post("/api/v1/watchers", json=payload())).json()
+    no_catchup_enqueue.clear()
+
+    await auth_client.patch(
+        f"/api/v1/watchers/{created['id']}", json={"subreddits": ["forhire", "python"]}
+    )
+
+    [(_, subreddits, _)] = no_catchup_enqueue
+    assert subreddits == ["python"]
+
+
+async def test_patch_without_new_subreddits_does_not_enqueue(auth_client, no_catchup_enqueue):
+    created = (await auth_client.post("/api/v1/watchers", json=payload())).json()
+    no_catchup_enqueue.clear()
+
+    await auth_client.patch(f"/api/v1/watchers/{created['id']}", json={"name": "renamed"})
+    await auth_client.patch(f"/api/v1/watchers/{created['id']}", json={"subreddits": ["forhire"]})
+
+    assert no_catchup_enqueue == []

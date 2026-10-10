@@ -2,6 +2,11 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Each Arq consumer reads its own queue. On the shared default queue a worker pulls jobs for
+# functions it doesn't register and drops them as "function not found".
+MATCH_QUEUE = "arq:match"
+NOTIFY_QUEUE = "arq:notify"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

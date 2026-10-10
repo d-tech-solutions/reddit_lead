@@ -58,6 +58,10 @@ retried batch is idempotent. One commit per batch.
 - `on_startup`/`on_shutdown` — `startup()` (match.py:250-265) builds the `IntentVerifier` once
   per worker process (not per job) and stores it in `ctx`; `shutdown()` (match.py:268-272) closes
   its HTTP client.
+- `queue_name = MATCH_QUEUE` (`"arq:match"`, defined in `app/core/config.py`). The ingestion worker
+  enqueues `match_post` onto it, and the notify worker reads its own `NOTIFY_QUEUE`. Both used to
+  share Arq's default queue, so each worker pulled the other's jobs and dropped them as "function
+  not found" (the matcher never saw its posts). Any new `enqueue_job` call must pass `_queue_name`.
 - `max_tries = 3` — three attempts per job, then it's left for the backfill sweep rather than
   retried indefinitely.
 

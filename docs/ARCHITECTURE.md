@@ -56,8 +56,14 @@ rate-limited by Reddit; the matcher/verifier stage is cost-sensitive; notificati
   batched call per post (chunked only if a subreddit has more candidates than the configured
   batch size), and gets back one yes/no verdict per watcher, judged on direction, subject, and
   substance together
-- Every candidate is written to the `matches` table, pass or fail — rejected rows are a
-  calibration record of what the verifier saw and decided, not discarded
+- `reddit_posts` is the **work queue**: a post is deleted as soon as it is judged, in the same
+  transaction that stores the outcome. A confirmed post moves to `matched_posts` and gets a
+  `matches` row per confirming watcher; a rejected one is dropped, only counted in `match_stats`
+  and sampled into a 7-day `rejection_log`. The queue therefore stays as small as the backlog.
+- `seen_posts` (just the Reddit id) is the dedup memory that lets judged posts be deleted without
+  being re-ingested
+- A new watcher judges only posts made at or after its creation; a one-off catch-up job covers the
+  hour before (see [[match]]). Ingestion never stores posts older than that one-hour window
 - Confirmed matches are enqueued for notification
 - See [[matcher]] for why one batched call per post replaced the earlier vector-gate design
 
@@ -83,8 +89,12 @@ rate-limited by Reddit; the matcher/verifier stage is cost-sensitive; notificati
 ```
 users            (id, email, auth info, plan, created_at)
 watchers         (id, user_id, name, intent_text, subreddits[], status, created_at)
-reddit_posts     (id, reddit_post_id, subreddit, title, body, author, fetched_at)
-matches          (id, watcher_id, reddit_post_id, llm_verified bool, llm_reason, created_at, read_at)
+reddit_posts     (id, reddit_post_id, subreddit, title, body, ..., attempts, locked_until)  -- work queue
+seen_posts       (reddit_post_id, seen_at)                      -- dedup memory, pruned after ~7 days
+matched_posts    (id, reddit_post_id, subreddit, title, body, author, permalink, posted_at, ...)
+matches          (id, watcher_id, matched_post_id, llm_reason, created_at, notified_at, read_at)
+match_stats      (watcher_id, subreddit, day, reviewed, confirmed)   -- analytics counters
+rejection_log    (id, watcher_id, reddit_post_id, title, permalink, reason, created_at)  -- 7 days
 notifications    (id, match_id, channel, status, sent_at)
 notification_channels (id, user_id, type[email|telegram], config, verified bool)
 subscriptions    (id, user_id, stripe_customer_id, plan, status)

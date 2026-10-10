@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
+from app.core.config import MATCH_QUEUE, NOTIFY_QUEUE, get_settings
 from app.db.session import async_session_factory
 from app.models.match import Match
 from app.models.reddit_post import RedditPost
@@ -162,7 +162,12 @@ async def enqueue_notifications(
     for match_id in result.scalars():
         try:
             # A job id derived from the match id makes a duplicate enqueue a no-op.
-            await redis.enqueue_job("notify_match", str(match_id), _job_id=f"notify_match:{match_id}")
+            await redis.enqueue_job(
+                "notify_match",
+                str(match_id),
+                _job_id=f"notify_match:{match_id}",
+                _queue_name=NOTIFY_QUEUE,
+            )
         except Exception:
             logger.exception("match: failed enqueueing notify job for match %s", match_id)
 
@@ -315,5 +320,6 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(_settings.REDIS_URL)
+    queue_name = MATCH_QUEUE
     # Three attempts, then leave it to the backfill sweep.
     max_tries = 3

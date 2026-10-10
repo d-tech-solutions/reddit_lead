@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
 from app.models.match import Match
-from app.models.reddit_post import RedditPost
+from app.models.matched_post import MatchedPost
 from app.models.user import User
 from app.models.watcher import Watcher
 
@@ -119,7 +119,7 @@ async def seed(session, watcher: Watcher) -> int:
         suffix = uuid.uuid4().hex[:8]
         posted = now - timedelta(hours=index + 1)
 
-        post = RedditPost(
+        post = MatchedPost(
             reddit_post_id=f"{SEED_PREFIX}{suffix}",
             subreddit=watcher.subreddits[0] if watcher.subreddits else "forhire",
             title=title,
@@ -134,12 +134,10 @@ async def seed(session, watcher: Watcher) -> int:
         session.add(
             Match(
                 watcher_id=watcher.id,
-                reddit_post_id=post.id,
-                llm_verified=True,
+                matched_post_id=post.id,
                 llm_reason=reason,
                 llm_model="seed-script",
                 created_at=posted,
-                verified_at=posted,
             )
         )
         written += 1
@@ -149,10 +147,10 @@ async def seed(session, watcher: Watcher) -> int:
 
 
 # Delete every row this script has ever written, matched on the reddit_post_id prefix.
-# The matches go with them via matches_reddit_post_id_fkey ON DELETE CASCADE.
+# The matches go with them via matches_matched_post_id_fkey ON DELETE CASCADE.
 async def clear(session) -> int:
     result = await session.execute(
-        delete(RedditPost).where(RedditPost.reddit_post_id.startswith(SEED_PREFIX))
+        delete(MatchedPost).where(MatchedPost.reddit_post_id.startswith(SEED_PREFIX))
     )
     await session.commit()
     return int(result.rowcount or 0)

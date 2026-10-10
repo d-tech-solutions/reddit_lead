@@ -146,6 +146,23 @@ async def auth_client(db_session: AsyncSession, db_user: User) -> AsyncClient:
         app.dependency_overrides.clear()
 
 
+@pytest.fixture(autouse=True)
+def no_catchup_enqueue(monkeypatch):
+    """Keep watcher create/update from opening a real Redis connection; records what it was asked.
+
+    The endpoints import `enqueue_catchup` by name, so the name is patched where it is used.
+    """
+    calls: list[tuple] = []
+
+    async def record(watcher_id, subreddits, until):
+        calls.append((watcher_id, list(subreddits), until))
+
+    from app.api.v1.endpoints import watchers as watchers_endpoint
+
+    monkeypatch.setattr(watchers_endpoint, "enqueue_catchup", record)
+    return calls
+
+
 class FakeVerifier:
     """Test double satisfying the `IntentVerifier` protocol — no network, no key, no spend.
 
@@ -154,11 +171,22 @@ class FakeVerifier:
     asserting anything about real model behaviour.
     """
 
-    def __init__(self, matches: bool = True, fail_on: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        matches: bool = True,
+        fail_on: set[str] | None = None,
+        matching: set[str] | None = None,
+    ) -> None:
         self.matches = matches
         self.fail_on = fail_on or set()
+        # When set, only candidates whose intent (or posts whose title) is listed match.
+        self.matching = matching
         self.calls: list[tuple[str, str, list[tuple[uuid.UUID, str]]]] = []
+        self.post_calls: list[tuple[str, list[tuple[str, str, str]]]] = []
         self.closed = False
+
+    def _decide(self, key: str) -> bool:
+        return self.matches if self.matching is None else key in self.matching
 
     async def verify_batch(self, post_title: str, post_body: str, candidates):
         from app.workers.verifier import Verdict
@@ -170,11 +198,25 @@ class FakeVerifier:
                 raise RuntimeError("verifier is down")
             verdicts.append(
                 Verdict(
-                    watcher_id=watcher_id, matches=self.matches, reason="fake verdict",
-                    model="fake-model",
+                    watcher_id=watcher_id, matches=self._decide(intent_text),
+                    reason="fake verdict", model="fake-model",
                 )
             )
         return verdicts
+
+    async def verify_posts(self, intent_text: str, posts):
+        from app.workers.verifier import PostVerdict
+
+        self.post_calls.append((intent_text, list(posts)))
+        if intent_text in self.fail_on:
+            raise RuntimeError("verifier is down")
+        return [
+            PostVerdict(
+                reddit_post_id=reddit_post_id, matches=self._decide(title),
+                reason="fake verdict", model="fake-model",
+            )
+            for reddit_post_id, title, _ in posts
+        ]
 
     async def close(self) -> None:
         self.closed = True

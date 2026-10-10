@@ -17,6 +17,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import MATCH_QUEUE, NOTIFY_QUEUE
 from app.models.match import Match
 from app.models.notification_channel import NotificationChannel
 from app.models.notification_delivery import NotificationDelivery
@@ -29,8 +30,8 @@ from app.notifiers.base import (
 )
 from app.notifiers.email import EmailNotifier, render_html
 from app.workers import match as match_worker
-from app.workers import notify
-from tests.test_match import make_db_post, make_db_watcher, make_user
+from app.workers import notify, outcomes
+from tests.test_match import make_db_watcher, make_matched_post, make_user
 
 TEST_KEY = Fernet.generate_key().decode()
 
@@ -126,16 +127,15 @@ def fake_ctx(notifier: FakeNotifier | None, max_attempts: int = 4) -> dict:
 
 
 async def confirmed_match(
-    session: AsyncSession, user: User, *, verified_at: datetime | None = None, **watcher_kwargs
+    session: AsyncSession, user: User, *, created_at: datetime | None = None, **watcher_kwargs
 ) -> Match:
     watcher = await make_db_watcher(session, user, **watcher_kwargs)
-    post = await make_db_post(session)
+    post = await make_matched_post(session)
     row = Match(
         watcher_id=watcher.id,
-        reddit_post_id=post.id,
-        llm_verified=True,
+        matched_post_id=post.id,
         llm_reason="clear request",
-        verified_at=verified_at or datetime.now(UTC),
+        created_at=created_at or datetime.now(UTC),
     )
     session.add(row)
     await session.commit()
@@ -226,19 +226,16 @@ async def test_notify_match_skips_when_there_is_no_address(db_session, use_test_
 
 
 @pytest.mark.db
-async def test_notify_match_ignores_paused_watchers_and_unconfirmed_matches(
+async def test_notify_match_ignores_paused_watchers_and_unknown_matches(
     db_session, use_test_session
 ):
     user = await make_user(db_session)
     user.email = "account@example.com"
     paused = await confirmed_match(db_session, user, status="paused")
-    rejected = await confirmed_match(db_session, user)
-    rejected.llm_verified = False
-    await db_session.commit()
     notifier = FakeNotifier()
 
     assert await notify.notify_match(fake_ctx(notifier), str(paused.id)) == 0
-    assert await notify.notify_match(fake_ctx(notifier), str(rejected.id)) == 0
+    assert await notify.notify_match(fake_ctx(notifier), str(uuid.uuid4())) == 0
     assert notifier.sent == []
 
 
@@ -280,7 +277,7 @@ async def test_pending_sweep_finds_recent_unnotified_matches_only(db_session):
     user = await make_user(db_session)
     fresh = await confirmed_match(db_session, user, name="fresh")
     await confirmed_match(
-        db_session, user, name="old", verified_at=datetime.now(UTC) - timedelta(hours=48)
+        db_session, user, name="old", created_at=datetime.now(UTC) - timedelta(hours=48)
     )
     done = await confirmed_match(db_session, user, name="done")
     done.notified_at = datetime.now(UTC)
@@ -298,26 +295,40 @@ async def test_pending_sweep_finds_recent_unnotified_matches_only(db_session):
 class FakeRedis:
     def __init__(self) -> None:
         self.jobs: list[tuple[str, str, str]] = []
+        self.queues: list[str] = []
 
-    async def enqueue_job(self, name: str, arg: str, _job_id: str) -> None:
+    async def enqueue_job(self, name: str, arg: str, _job_id: str, _queue_name: str) -> None:
         self.jobs.append((name, arg, _job_id))
+        self.queues.append(_queue_name)
 
 
-@pytest.mark.db
-async def test_enqueue_notifications_queues_each_confirmed_unnotified_match(db_session):
-    user = await make_user(db_session)
-    confirmed = await confirmed_match(db_session, user, name="a")
-    other_watcher = await make_db_watcher(db_session, user, name="b")
-    db_session.add(
-        Match(watcher_id=other_watcher.id, reddit_post_id=confirmed.reddit_post_id, llm_verified=False)
-    )
-    await db_session.commit()
+async def test_enqueue_notifications_queues_a_job_per_match():
+    first, second = uuid.uuid4(), uuid.uuid4()
     redis = FakeRedis()
 
-    await match_worker.enqueue_notifications(redis, db_session, confirmed.reddit_post_id)
+    await outcomes.enqueue_notifications(redis, [first, second])
 
-    assert redis.jobs == [("notify_match", str(confirmed.id), f"notify_match:{confirmed.id}")]
+    # The job id is derived from the match id so a duplicate enqueue is a no-op.
+    assert redis.jobs == [
+        ("notify_match", str(first), f"notify_match:{first}"),
+        ("notify_match", str(second), f"notify_match:{second}"),
+    ]
+    assert redis.queues == [NOTIFY_QUEUE, NOTIFY_QUEUE]
+
+
+async def test_enqueue_notifications_survives_a_failing_queue():
+    class BrokenRedis:
+        async def enqueue_job(self, *args, **kwargs):
+            raise RuntimeError("redis is down")
+
+    await outcomes.enqueue_notifications(BrokenRedis(), [uuid.uuid4()])
+
+
+def test_workers_consume_separate_queues():
+    assert match_worker.WorkerSettings.queue_name == MATCH_QUEUE
+    assert notify.WorkerSettings.queue_name == NOTIFY_QUEUE
+    assert MATCH_QUEUE != NOTIFY_QUEUE
 
 
 async def test_enqueue_notifications_without_redis_is_a_noop():
-    await match_worker.enqueue_notifications(None, None, uuid.uuid4())
+    await outcomes.enqueue_notifications(None, [uuid.uuid4()])

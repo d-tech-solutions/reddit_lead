@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import get_settings
+from app.core.config import NOTIFY_QUEUE, get_settings
 from app.core.constants import channel_allowed
 from app.core.crypto import (
     EncryptionNotConfigured,
@@ -293,5 +293,6 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = RedisSettings.from_dsn(_settings.REDIS_URL)
+    queue_name = NOTIFY_QUEUE
     # Retries are driven by `arq.Retry` against NOTIFY_MAX_ATTEMPTS; this is only the upper bound.
     max_tries = _settings.NOTIFY_MAX_ATTEMPTS

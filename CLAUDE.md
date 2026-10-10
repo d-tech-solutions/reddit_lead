@@ -6,6 +6,10 @@ the kind of request they want to catch), and the app notifies them when a matchi
 **Status**: ingestion and matcher/LLM-verifier workers built. Auth (Clerk) + watcher CRUD built end
 to end, API and UI. Match feed built end to end (API + UI). Billing (Stripe checkout/portal/webhook)
 built end to end, API and UI. Notification worker built for email (Resend), Slack (pasted webhook) and Telegram (paid plans, bot webhook).
+Pipeline storage is queue-shaped: `reddit_posts` holds only posts awaiting the LLM and a judged post
+is deleted; confirmed posts live in `matched_posts` (+ `matches`), rejections are only counted
+(`match_stats`) and sampled for 7 days (`rejection_log`), `seen_posts` is the dedup memory, and a
+new watcher gets a one-hour catch-up. See `docs/backend/worker/match.md`.
 
 ## Start here
 
@@ -63,6 +67,9 @@ Swap the last command for `/opt/venv/bin/ruff check --ignore EXE002 .` or
 `EXE002` ignore is because every file looks executable across a Windows bind mount. From Git Bash,
 prefix docker commands with `MSYS_NO_PATHCONV=1` or `-w /w` is rewritten to `W:/`.
 
+The dev database is shared with the running stack, so DB tests must use their own unique subreddits
+and assert on their own rows by id, never on whole-table counts (see `tests/test_match.py`).
+
 Dev-only helper: `docker compose exec api python -m scripts.seed_matches --email you@example.com`
 writes fake confirmed matches so the feed UI works without live API keys (`--clear` removes them).
 
@@ -95,6 +102,23 @@ granted. Do not propose scraping as a workaround (`docs/ARCHITECTURE.md` §8).
 **Never run git commands.** No `git add`, `commit`, `push`, `checkout`, `branch`, `stash`, `reset`,
 `rebase`, etc. — not even read-only ones like `git status` or `git log`. Version control is handled
 manually. If a task seems to need git, describe the commands and let the user run them.
+
+**Every code change must be secure and built to scale.** Treat both as part of "done", not a
+follow-up. Assume tables hold tens of lakhs to crores of rows and design for that from the start.
+
+- *Security*: validate and bound all external input (API params, webhook payloads, Reddit and LLM
+  output); use parameterized queries only (never string-built SQL); scope every query to the
+  caller (`user_id` / ownership checks — no IDOR); verify webhook signatures; never log or return
+  secrets, tokens or PII; keep secrets in env config, not code; return generic errors to clients.
+- *Performance*: no unbounded queries — every list read is paginated (keyset, not OFFSET) and has a
+  hard limit; no N+1 loops (batch with `IN`/`ANY`/bulk insert/`executemany`); every `WHERE`,
+  `JOIN` and `ORDER BY` on a large table must be backed by an index that the planner can actually
+  use (e.g. GIN + `@>` for array columns, not `= ANY()`); never hold a DB transaction open across
+  a network call (LLM, Reddit, email); make worker jobs idempotent and safe to run concurrently
+  (`ON CONFLICT`, `FOR UPDATE SKIP LOCKED`); bound table growth with retention or pruning; and
+  never load a whole table into memory.
+- When a change touches a hot path or a large table, say in the summary which index or limit keeps
+  it fast, and add the migration for any index it needs.
 
 **Document with docstrings, not a mandatory comment above every function.** Give a function a
 docstring (Python) or JSDoc block (TypeScript/JavaScript) when it's public API, or its behavior

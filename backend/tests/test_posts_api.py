@@ -1,13 +1,14 @@
-"""Post feed endpoint tests against a real Postgres.
+"""Matched-post feed endpoint tests against a real Postgres.
 
 Marked `db` and skipped automatically when Postgres is unreachable — see tests/conftest.py.
 
-Admin-only (see `app.api.v1.endpoints.posts`): scoped to every subreddit anything has ever been
-ingested from, not to the caller's own watchers, so `admin_client`/`db_admin_user` stand in for the
-caller throughout rather than `auth_client`/`db_user`.
+Admin-only (see `app.api.v1.endpoints.posts`): lists matched posts across every subreddit any
+watcher follows, not just the caller's own, so `admin_client`/`db_admin_user` stand in for the
+caller throughout rather than `auth_client`/`db_user`. The subreddit chips come from the watchers
+table, so `make_post` also creates a (throwaway-user) watcher for the post's subreddit.
 
 That global scope means these tests can't rely on an empty table the way the old per-user-scoped
-tests could — this Postgres instance also carries whatever a developer has ingested for real, and
+tests could — this Postgres instance also carries whatever a developer has matched for real, and
 the shared `db_session` fixture only rolls back what *this* test itself commits. Every test below
 therefore invents its own unique subreddit name(s) (`unique_subreddit()`) so its rows can never
 collide with, or get lost among, unrelated data already sitting in the table.
@@ -26,7 +27,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.reddit_post import RedditPost
+from app.models.matched_post import MatchedPost
 from app.models.user import User
 from app.models.watcher import Watcher
 from app.services.posts import decode_cursor, encode_cursor
@@ -56,15 +57,20 @@ async def make_watcher(
     return watcher
 
 
-# Create a Reddit post row. `reddit_post_id` is unique, so it gets a fresh value every call.
+# Create a matched-post row, plus a watcher (owned by a throwaway user) so its subreddit is
+# listed. `reddit_post_id` is unique, so it gets a fresh value every call.
 async def make_post(
     session: AsyncSession,
     subreddit: str,
     title: str = "Need a dev",
     minutes_ago: int = 0,
-) -> RedditPost:
+) -> MatchedPost:
+    owner = User(clerk_user_id=f"user_test_{uuid.uuid4().hex[:12]}")
+    session.add(owner)
+    await session.commit()
+    await make_watcher(session, owner, [subreddit])
     suffix = uuid.uuid4().hex[:10]
-    post = RedditPost(
+    post = MatchedPost(
         reddit_post_id=f"t3_{suffix}",
         subreddit=subreddit,
         title=title,
@@ -155,7 +161,7 @@ async def test_subreddit_filter_narrows_to_one_subreddit(admin_client, db_sessio
     assert [item["title"] for item in items] == ["for-b"]
 
 
-async def test_subreddit_filter_cannot_reach_a_subreddit_nothing_was_ingested_from(
+async def test_subreddit_filter_cannot_reach_a_subreddit_nothing_watches(
     admin_client, db_session
 ):
     await make_post(db_session, subreddit=unique_subreddit())

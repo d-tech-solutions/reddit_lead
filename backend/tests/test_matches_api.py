@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.match import Match
-from app.models.reddit_post import RedditPost
+from app.models.matched_post import MatchedPost
 from app.models.user import User
 from app.models.watcher import Watcher
 from app.services.matches import decode_cursor, encode_cursor
@@ -40,10 +40,10 @@ async def make_watcher(session: AsyncSession, user: User, name: str = "dev hirin
     return watcher
 
 
-# Create a Reddit post row. `reddit_post_id` is unique, so it gets a fresh value every call.
-async def make_post(session: AsyncSession, title: str = "Need a dev") -> RedditPost:
+# Create a matched-post row. `reddit_post_id` is unique, so it gets a fresh value every call.
+async def make_post(session: AsyncSession, title: str = "Need a dev") -> MatchedPost:
     suffix = uuid.uuid4().hex[:10]
-    post = RedditPost(
+    post = MatchedPost(
         reddit_post_id=f"t3_{suffix}",
         subreddit="forhire",
         title=title,
@@ -58,23 +58,20 @@ async def make_post(session: AsyncSession, title: str = "Need a dev") -> RedditP
     return post
 
 
-# Create a match row. `verified` maps straight onto the three-valued llm_verified column.
+# Create a match row (every stored match is a confirmed one).
 async def make_match(
     session: AsyncSession,
     watcher: Watcher,
-    post: RedditPost,
-    verified: bool | None = True,
+    post: MatchedPost,
     minutes_ago: int = 0,
     read: bool = False,
 ) -> Match:
     match = Match(
         watcher_id=watcher.id,
-        reddit_post_id=post.id,
-        llm_verified=verified,
-        llm_reason="They are asking for exactly this work." if verified else "Wrong direction.",
+        matched_post_id=post.id,
+        llm_reason="They are asking for exactly this work.",
         llm_model="fake-model",
         created_at=BASE_TIME - timedelta(minutes=minutes_ago),
-        verified_at=BASE_TIME - timedelta(minutes=minutes_ago),
         read_at=BASE_TIME if read else None,
     )
     session.add(match)
@@ -101,18 +98,6 @@ async def test_feed_returns_confirmed_matches(auth_client, db_session, db_user):
     assert item["watcher"]["name"] == "dev hiring"
     assert item["reason"] == "They are asking for exactly this work."
     assert item["read_at"] is None
-
-
-async def test_feed_excludes_rejected_and_unverified(auth_client, db_session, db_user):
-    watcher = await make_watcher(db_session, db_user)
-    await make_match(db_session, watcher, await make_post(db_session), verified=False)
-    await make_match(db_session, watcher, await make_post(db_session), verified=None)
-
-    response = await auth_client.get("/api/v1/matches")
-
-    # NULL means "the verifier has not run", not "probably fine" — it must be excluded as firmly
-    # as an outright rejection.
-    assert response.json()["items"] == []
 
 
 async def test_feed_is_newest_first(auth_client, db_session, db_user):
@@ -266,11 +251,10 @@ async def test_limit_is_capped(auth_client):
 # --- Read tracking --------------------------------------------------------------------------------
 
 
-async def test_unread_count_counts_only_confirmed_unread(auth_client, db_session, db_user):
+async def test_unread_count_counts_only_unread(auth_client, db_session, db_user):
     watcher = await make_watcher(db_session, db_user)
     await make_match(db_session, watcher, await make_post(db_session))
     await make_match(db_session, watcher, await make_post(db_session), read=True)
-    await make_match(db_session, watcher, await make_post(db_session), verified=False)
 
     assert (await auth_client.get("/api/v1/matches")).json()["unread"] == 1
     assert (await auth_client.get("/api/v1/me")).json()["unread_matches"] == 1

@@ -4,9 +4,13 @@ import pytest
 
 from app.workers.verifier import (
     MAX_POST_CHARS,
+    POSTS_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
+    PostVerdict,
     Verdict,
     apply_candidate_numbers,
+    apply_post_numbers,
+    build_posts_prompt,
     build_prompt,
     build_verifier,
 )
@@ -131,3 +135,55 @@ def test_apply_candidate_numbers_handles_fewer_verdicts_than_candidates():
 
     assert len(verdicts) == 1
     assert verdicts[0].watcher_id == WATCHER_A
+
+
+# --- verify_posts (one watcher, many posts) -------------------------------------------------------
+
+POSTS = [("t3_a", "Need a React dev", "details"), ("t3_b", "Selling a couch", "")]
+
+
+def test_build_posts_prompt_numbers_posts_and_includes_the_intent():
+    prompt = build_posts_prompt("someone hiring a developer", POSTS)
+
+    assert "someone hiring a developer" in prompt
+    assert "Post 1:\nNeed a React dev" in prompt
+    assert "Post 2:\nSelling a couch" in prompt
+
+
+def test_build_posts_prompt_truncates_a_long_post():
+    prompt = build_posts_prompt("intent", [("t3_a", "t", "x" * (MAX_POST_CHARS * 2))])
+
+    assert prompt.count("x") <= MAX_POST_CHARS
+
+
+def test_posts_system_prompt_covers_the_same_criteria():
+    for needle in ("Direction", "Subject", "Substance", "ties go to false"):
+        assert needle in POSTS_SYSTEM_PROMPT
+
+
+def test_apply_post_numbers_maps_back_to_reddit_ids():
+    raw = [
+        {"candidate_number": 2, "matches": False, "reasoning": "no"},
+        {"candidate_number": 1, "matches": True, "reasoning": "yes"},
+    ]
+
+    verdicts = apply_post_numbers(raw, POSTS, "m")
+
+    assert verdicts == [
+        PostVerdict(reddit_post_id="t3_b", matches=False, reason="no", model="m"),
+        PostVerdict(reddit_post_id="t3_a", matches=True, reason="yes", model="m"),
+    ]
+
+
+def test_apply_post_numbers_skips_bad_numbers_and_truncates_reasons():
+    raw = [
+        {"candidate_number": 9, "matches": True, "reasoning": "?"},
+        {"candidate_number": "one", "matches": True, "reasoning": "?"},
+        {"candidate_number": 1, "reasoning": "x" * 2000},
+    ]
+
+    verdicts = apply_post_numbers(raw, POSTS, "m")
+
+    assert len(verdicts) == 1
+    assert verdicts[0].matches is False
+    assert len(verdicts[0].reason) == 500
