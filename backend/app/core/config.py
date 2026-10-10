@@ -34,6 +34,35 @@ class Settings(BaseSettings):
     MATCH_BATCH_SIZE: int = 15
     MATCH_BACKFILL_INTERVAL_MINUTES: int = 5
     MATCH_BACKFILL_LIMIT: int = 200
+    # A post in `reddit_posts` is owned by one worker for this long after it is claimed; if the
+    # worker dies the post becomes claimable again once the lease runs out.
+    MATCH_CLAIM_SECONDS: int = 300
+    # The sweep skips posts younger than this so it doesn't race the job enqueued at ingest time.
+    MATCH_BACKFILL_MIN_AGE_SECONDS: int = 120
+    # Claims before a post is given up on and dropped (logged as an error).
+    MATCH_MAX_ATTEMPTS: int = 5
+
+    # Freshness window. Ingestion never stores a post older than this, and a new watcher's
+    # catch-up job looks back exactly this far from the moment the watcher was created.
+    NEW_WATCHER_LOOKBACK_MINUTES: int = 60
+    # Cap on posts judged per catch-up (per subreddit) so one new watcher on a huge subreddit can't
+    # trigger thousands of LLM calls.
+    CATCHUP_MAX_POSTS: int = 50
+    # Posts per LLM call in a catch-up (one watcher, many posts).
+    CATCHUP_BATCH_SIZE: int = 10
+    # Most posts one ingest poll will take from a subreddit.
+    INGEST_MAX_POSTS_PER_POLL: int = 100
+
+    # Retention. Dedup memory and the rejection sample are short-lived; a user's matches (and any
+    # matched post nothing references anymore) go after this many days without an authenticated
+    # request.
+    SEEN_POSTS_RETENTION_DAYS: int = 7
+    REJECTION_LOG_RETENTION_DAYS: int = 7
+    USER_INACTIVITY_RETENTION_DAYS: int = 90
+    # `users.last_active_at` is refreshed at most this often per user.
+    LAST_ACTIVE_TOUCH_MINUTES: int = 60
+    # Rows deleted per statement by the retention jobs, so a big purge never holds a long lock.
+    RETENTION_BATCH_SIZE: int = 1000
 
     # Notification worker. Email goes out through Resend; with no key the email notifier is simply
     # not registered, so matches stay un-notified (and the backfill sweep picks them up) rather than

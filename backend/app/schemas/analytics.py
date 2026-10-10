@@ -23,8 +23,6 @@ class VerdictTotals(BaseModel):
 
     confirmed: int
     rejected: int
-    # Candidates the verifier has not reached yet. Excluded from `pass_rate`.
-    pending: int
     pass_rate: float | None
 
 
@@ -51,6 +49,21 @@ class WatcherStat(BaseModel):
     last_match_at: datetime | None
 
 
+class RejectionRead(BaseModel):
+    """One recently rejected candidate: enough to recognise the post and read the verifier's reason.
+
+    Comes from a short-lived sample (`rejection_log`), not a permanent record.
+    """
+
+    watcher_id: uuid.UUID
+    watcher_name: str
+    subreddit: str
+    title: str
+    permalink: str
+    reason: str
+    rejected_at: datetime
+
+
 class Analytics(BaseModel):
     days: int
     totals: VerdictTotals
@@ -58,3 +71,5 @@ class Analytics(BaseModel):
     daily: list[DailyCount]
     top_subreddits: list[SubredditStat]
     watchers: list[WatcherStat]
+    # Newest first, capped; empty once the sample has aged out.
+    recent_rejections: list[RejectionRead]

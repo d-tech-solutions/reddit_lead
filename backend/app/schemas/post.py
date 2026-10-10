@@ -1,8 +1,7 @@
-"""Response shapes for the raw post feed (`/posts`).
+"""Response shapes for the matched-post feed (`/posts`, admin only).
 
-Every post the ingestion worker has stored for a subreddit the caller watches, independent of
-whether it ever matched anything — unlike the match feed, this is the raw ingested data, not the
-LLM-verified subset.
+Every post the LLM verifier confirmed for at least one watcher. Posts nobody matched are deleted
+once judged, so unlike the old raw-ingest view nothing unmatched appears here.
 """
 
 from __future__ import annotations

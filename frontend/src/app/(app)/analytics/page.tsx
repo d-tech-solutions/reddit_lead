@@ -174,7 +174,7 @@ function Dashboard({ data }: { data: Analytics }) {
           value={percent(totals.pass_rate)}
           hint="Confirmed ÷ reviewed"
         />
-        <Stat label="Awaiting review" value={String(totals.pending)} />
+        <Stat label="Reviewed by AI" value={String(totals.confirmed + totals.rejected)} />
       </section>
 
       <Card>
@@ -266,6 +266,48 @@ function Dashboard({ data }: { data: Analytics }) {
           </CardContent>
         </Card>
       </div>
+
+      <RecentRejections rejections={data.recent_rejections} />
     </>
+  );
+}
+
+// A short-lived sample of what the verifier turned down, so a watcher that "misses" a post can be
+// tuned. Rejections are not stored permanently — only counted — which is why this ages out.
+function RecentRejections({ rejections }: { rejections: Analytics["recent_rejections"] }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Recently rejected</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-3">
+        {rejections.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No recent rejections.</p>
+        ) : (
+          <ul className="grid gap-4 text-sm">
+            {rejections.map((rejection, index) => (
+              <li key={`${rejection.permalink}-${rejection.watcher_id}-${index}`} className="grid gap-0.5">
+                <a
+                  href={rejection.permalink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="truncate font-medium underline-offset-2 hover:underline"
+                >
+                  {rejection.title}
+                </a>
+                <p className="text-xs text-muted-foreground">
+                  r/{rejection.subreddit} · {rejection.watcher_name} ·{" "}
+                  {new Date(rejection.rejected_at).toLocaleString()}
+                </p>
+                <p className="text-xs text-muted-foreground">{rejection.reason}</p>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="text-xs text-muted-foreground">
+          Only the last few days are kept; the totals above are permanent.
+        </p>
+      </CardContent>
+    </Card>
   );
 }

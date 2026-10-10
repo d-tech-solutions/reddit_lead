@@ -1,9 +1,8 @@
-"""The raw post feed: everything the ingestion worker has pulled from Reddit.
+"""The matched-post feed: every post the LLM verifier confirmed for at least one watcher.
 
-Unlike `/matches`, nothing here has been through the vector gate or the LLM verifier — this is
-what's actually flowing into the pipeline before any matching happens. Admin-only: it spans every
-ingested subreddit, not just the caller's own watchers, so it doubles as visibility into what's
-being sent to the AI verifier for analysis.
+Unlike `/matches` (one row per watcher, scoped to the caller), this is one row per Reddit post
+across all users, so it is admin-only. Posts nobody matched are deleted once judged and never
+appear here.
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_superadmin
 from app.db.session import get_db
-from app.models.reddit_post import RedditPost
+from app.models.matched_post import MatchedPost
 from app.models.user import User
 from app.schemas.post import DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, PostPage, PostRead
 from app.services import posts as service
@@ -21,7 +20,7 @@ from app.services import posts as service
 router = APIRouter(prefix="/posts", tags=["posts"])
 
 
-def _to_read(post: RedditPost) -> PostRead:
+def _to_read(post: MatchedPost) -> PostRead:
     return PostRead(
         id=post.id,
         reddit_post_id=post.reddit_post_id,

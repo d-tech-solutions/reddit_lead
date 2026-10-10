@@ -1,7 +1,7 @@
 """The match feed: confirmed matches for the authenticated user, and read tracking.
 
-Only `llm_verified IS TRUE` rows appear here. The table also holds every candidate the vector gate
-produced — rejected and not-yet-verified — but those are calibration data, not product surface.
+Every row in `matches` is a confirmed match (rejections are only counted and sampled, never stored
+as matches), so there is nothing to filter on here.
 """
 
 from __future__ import annotations

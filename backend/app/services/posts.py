@@ -1,9 +1,9 @@
-"""Feed queries for raw ingested Reddit posts.
+"""Feed queries for matched Reddit posts.
 
-`reddit_posts` carries no `user_id` of its own — the ingestion worker fetches a subreddit once for
-every watcher that references it, regardless of who owns them. So "which posts can this user see"
-is answered by joining through the caller's own watchers' subreddit lists rather than a foreign
-key, the same way `matches.py` answers "which matches" through `watchers.user_id`.
+`matched_posts` holds every post at least one watcher's intent confirmed (posts nobody matched are
+deleted once judged). It carries no `user_id` of its own — a post can match several users — so this
+module is only used by the admin view, which spans all of them; per-user reads go through
+`matches.py`, which joins `matches -> watchers` and filters on `watchers.user_id`.
 """
 
 from __future__ import annotations
@@ -14,10 +14,10 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Select, select, tuple_
+from sqlalchemy import Select, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.reddit_post import RedditPost
+from app.models.matched_post import MatchedPost
 from app.models.watcher import Watcher
 
 
@@ -61,29 +61,30 @@ async def watched_subreddits(session: AsyncSession, user_id: uuid.UUID) -> list[
     return sorted(subreddits)
 
 
-# Every subreddit ever ingested, for the admin pipeline view — unlike `watched_subreddits`, not
-# scoped to any one user's watchers, since an admin is checking the whole pipeline's intake.
+# Every subreddit any watcher follows, for the admin view's filter chips — unlike
+# `watched_subreddits`, not scoped to one user. Read from `watchers` (small) rather than
+# `SELECT DISTINCT subreddit` over `matched_posts`, which grows without bound.
 async def distinct_subreddits(session: AsyncSession) -> list[str]:
-    result = await session.execute(select(RedditPost.subreddit).distinct())
+    result = await session.execute(select(func.unnest(Watcher.subreddits)).distinct())
     return sorted(result.scalars())
 
 
 def _posts_query(subreddits: list[str], subreddit: str | None) -> Select:
-    query = select(RedditPost).where(RedditPost.subreddit.in_(subreddits))
+    query = select(MatchedPost).where(MatchedPost.subreddit.in_(subreddits))
     # Note this narrows an already subreddit-scoped query. Filtering on `subreddit` *instead of*
     # the caller's watched list would let anyone read any subreddit's posts by guessing a name.
     if subreddit is not None:
-        query = query.where(RedditPost.subreddit == subreddit)
+        query = query.where(MatchedPost.subreddit == subreddit)
     return query
 
 
 @dataclass(frozen=True)
 class PostPage:
-    items: list[RedditPost]
+    items: list[MatchedPost]
     next_cursor: str | None
 
 
-# Read one page of ingested posts, most-recently-fetched first.
+# Read one page of matched posts, most-recently-fetched first.
 #
 # `subreddits` is the caller's full watched set — pass the same list regardless of the `subreddit`
 # filter, since an empty list here (no watchers yet) should short-circuit rather than reach the DB.
@@ -103,10 +104,10 @@ async def fetch_posts(
     # feed continuously, and an OFFSET window shifts under that with every insert.
     if cursor is not None:
         query = query.where(
-            tuple_(RedditPost.fetched_at, RedditPost.id) < (cursor.fetched_at, cursor.post_id)
+            tuple_(MatchedPost.fetched_at, MatchedPost.id) < (cursor.fetched_at, cursor.post_id)
         )
 
-    query = query.order_by(RedditPost.fetched_at.desc(), RedditPost.id.desc()).limit(limit + 1)
+    query = query.order_by(MatchedPost.fetched_at.desc(), MatchedPost.id.desc()).limit(limit + 1)
     result = await session.execute(query)
     rows = list(result.scalars())
 

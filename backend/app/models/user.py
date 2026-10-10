@@ -37,6 +37,12 @@ class User(Base):
     # from a Clerk-side ban since it's ours to flip without touching the Clerk identity.
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Last authenticated API request, refreshed at most once per LAST_ACTIVE_TOUCH_MINUTES (see
+    # `get_current_user`). Drives the inactivity retention of a user's matches.
+    last_active_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

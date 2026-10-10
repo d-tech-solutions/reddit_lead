@@ -1,68 +1,83 @@
 # Matcher worker
 
 The matcher ([backend/app/workers/match.py](../../../backend/app/workers/match.py)) runs as an
-Arq consumer (`arq app.workers.match.WorkerSettings`), not an interval loop — it's triggered by
-the ingestion worker the moment a post is inserted, with a backfill cron sweep as the safety net.
-Same two-trigger shape as the rest of the pipeline (see [ingest.md](ingest.md)).
+Arq consumer (`arq app.workers.match.WorkerSettings`), not an interval loop. It is triggered by the
+ingestion worker the moment a post is queued, with a backfill cron sweep as the safety net, and it
+also runs the new-watcher catch-up job and the retention cron.
 
-One stage per post: find every active watcher whose subreddit list covers this post (a plain DB
-query, no vector search), then ask the verifier for one verdict per watcher in a single batched
-call (chunked if there are many candidates). Every candidate is written to `matches` whether it
-passes or fails, so the rejected rows stay a record of what the verifier saw and decided.
+## Where posts live
+
+| Table | Role | Lifetime |
+|---|---|---|
+| `reddit_posts` | **Work queue.** A row exists only until the LLM has judged the post. | Deleted when judged. |
+| `matched_posts` | Full content of posts at least one watcher confirmed. | Until no match references it (see Retention). |
+| `matches` | One row per confirmed (watcher, matched post): reason, model, `notified_at`, `read_at`. | Until the owner is inactive 90 days. |
+| `seen_posts` | Dedup memory: just the Reddit id and `seen_at`. | `SEEN_POSTS_RETENTION_DAYS` (7). |
+| `match_stats` | Daily `reviewed` / `confirmed` counters per (watcher, subreddit). Feeds analytics. | Kept. |
+| `rejection_log` | Truncated sample of rejections (title, permalink, reason). No FK to posts. | `REJECTION_LOG_RETENTION_DAYS` (7). |
+
+Rejected candidates are **not** stored as `matches` rows. They are counted in `match_stats` and
+sampled into `rejection_log`, so `matches` only grows with real hits.
 
 ## The `match_post` job
 
-`match_post()` (match.py:145-169), enqueued by the ingestion worker per new post id:
-
-1. Loads the `RedditPost` by id. If it's gone (shouldn't normally happen), logs and returns 0.
-2. `fetch_candidate_watchers()` (match.py:36-47) selects active `Watcher` rows whose
-   `subreddits` array contains the post's subreddit — filtering in SQL keeps the candidate set
-   small before anything reaches the LLM. No candidates means no work.
-3. `store_placeholder_matches()` (match.py:55-76) bulk-inserts one row per (watcher, post) pair
-   into `matches` with `llm_verified` left NULL, using `ON CONFLICT DO NOTHING` on the
-   `uq_matches_pair` constraint so a retried job doesn't duplicate rows. These placeholders are
-   what the backfill sweep looks for if a job dies mid-batch.
-4. `chunk_watchers()` (match.py:50-52) splits the candidate list into groups of
-   `MATCH_BATCH_SIZE` so one unusually busy subreddit doesn't produce one oversized LLM call.
-5. For each chunk, `_verify_and_apply()` (match.py:112-142) calls
-   `verifier.verify_batch(post.title, post.body, candidates)` and writes the results via
-   `apply_verdicts()`. A failed chunk (API error, refusal, etc.) is logged and left NULL rather
-   than failing the whole post — the backfill sweep retries it.
-6. Returns the number of confirmed (matched) verdicts for that post.
-
-`apply_verdicts()` (match.py:79-109) writes each verdict onto its placeholder row — `llm_verified`,
-`llm_reason`, `llm_model`, `verified_at` — skipping any row that's missing or already judged, so a
-retried batch is idempotent. One commit per batch.
+1. **Claim** (`claim_post`): `SELECT … FOR UPDATE SKIP LOCKED` on the queue row, then set
+   `locked_until = now + MATCH_CLAIM_SECONDS` and `attempts += 1`. Several workers can run without
+   taking the same post; a post already settled or held by another worker returns 0.
+2. **Candidates** (`fetch_candidate_watchers`): active watchers with
+   `subreddits @> ARRAY[subreddit]` (served by the GIN index `ix_watchers_subreddits_gin`) **and**
+   `watchers.created_at <= post.posted_at`. The second condition is the new-watcher rule below.
+   No candidates: the post is deleted without calling the LLM.
+3. **Verify**: candidates are chunked by `MATCH_BATCH_SIZE`, one `verify_batch` call per chunk. No
+   DB transaction is open during these network calls.
+4. **Settle** (`process_post`), in **one transaction**: `store_outcomes` (see
+   [outcomes.py](../../../backend/app/workers/outcomes.py)) upserts the post into `matched_posts`
+   and inserts `matches` for confirmations, samples rejections into `rejection_log`, bumps
+   `match_stats`; then the queue row is deleted. A crash cannot lose a match or leave a post
+   half-moved. After the commit, new match ids are enqueued for the notify worker.
+5. **Failure**: if any chunk fails (or the model skips a candidate) the post stays queued with a
+   backoff (`RETRY_BACKOFF_SECONDS × attempts`). At `MATCH_MAX_ATTEMPTS` it is settled with the
+   verdicts it has, or dropped if it has none (logged at ERROR). `purge_exhausted` also drops posts
+   whose worker died repeatedly.
 
 ## The backfill cron job
 
-`backfill()` (match.py:203-239) runs on an Arq cron schedule (`run_at_startup=True`, then every
-`MATCH_BACKFILL_INTERVAL_MINUTES`, converted to Arq's minute-set format by
-`backfill_minutes()` at match.py:242-247). It catches two failure modes:
+`backfill()` runs at startup and every `MATCH_BACKFILL_INTERVAL_MINUTES`. It drops exhausted posts,
+then claims the oldest claimable posts older than `MATCH_BACKFILL_MIN_AGE_SECONDS` (so it doesn't
+race the job enqueued at ingest) and settles each. A post that nobody watches is simply deleted,
+so the sweep never re-checks the same post.
 
-1. **Unjudged candidates** — `fetch_unverified_by_post()` (match.py:172-183) loads placeholder
-   rows still stuck at `llm_verified IS NULL`, oldest first, grouped by post so each post gets
-   one batched re-verification instead of one call per row.
-2. **Posts nothing ever ran for** — `fetch_unmatched_posts()` (match.py:186-200) finds
-   `RedditPost` rows with no `matches` row at all (an enqueue failure, or a job that exhausted
-   its retries). It re-derives candidates and stores fresh placeholders for them. A post in a
-   subreddit nobody watches keeps getting re-checked every sweep — cheap, and correct, since a
-   watcher added later should still pick up an older post.
+## New watchers: the one-hour rule
+
+A watcher only judges posts made **at or after its `created_at`**. The hour before that is covered
+by a separate job so the two never judge the same post:
+
+- `catchup_watcher(watcher_id, subreddits, until)` is enqueued by the API on watcher create (and,
+  for just the added subreddits, on a PATCH that adds some). It fetches
+  `[until − NEW_WATCHER_LOOKBACK_MINUTES, until)` straight from Reddit via
+  `source.fetch_window` (the posts were already deleted from the queue if nobody matched them),
+  caps at `CATCHUP_MAX_POSTS` per subreddit, and judges them against that one watcher in batches of
+  `CATCHUP_BATCH_SIZE` using `verifier.verify_posts`. Results go through the same `store_outcomes`.
+- Ingestion also never stores a post older than `NEW_WATCHER_LOOKBACK_MINUTES`, so a freshly polled
+  subreddit no longer hands a new watcher the latest N posts regardless of age.
+- The enqueue is best-effort ([services/queue.py](../../../backend/app/services/queue.py)): a Redis
+  outage never fails watcher creation, it only skips the catch-up.
+
+## Retention cron
+
+`retention()` runs hourly (`services/retention.py`, batched deletes so no long locks):
+`seen_posts` and `rejection_log` past their windows; `matches` of users whose
+`users.last_active_at` is older than `USER_INACTIVITY_RETENTION_DAYS` (90); then `matched_posts`
+that no match references. `last_active_at` is refreshed by `get_current_user` at most once per
+`LAST_ACTIVE_TOUCH_MINUTES`.
 
 ## Worker config
 
-`WorkerSettings` (match.py:278-292):
+- `functions = [match_post, catchup_watcher]`; `cron_jobs = [backfill, retention]`.
+- `startup()` builds the `IntentVerifier` and the Reddit `PostSource` once per process (the source
+  is used by the catch-up job); `shutdown()` closes both.
+- `queue_name = MATCH_QUEUE` (`"arq:match"`). Any new `enqueue_job` call must pass `_queue_name`.
+- `max_tries = 3` per Arq job; beyond that the backfill sweep takes over.
 
-- `functions = [match_post]` — the one Arq-triggered job.
-- `cron_jobs` — the `backfill` sweep.
-- `on_startup`/`on_shutdown` — `startup()` (match.py:250-265) builds the `IntentVerifier` once
-  per worker process (not per job) and stores it in `ctx`; `shutdown()` (match.py:268-272) closes
-  its HTTP client.
-- `queue_name = MATCH_QUEUE` (`"arq:match"`, defined in `app/core/config.py`). The ingestion worker
-  enqueues `match_post` onto it, and the notify worker reads its own `NOTIFY_QUEUE`. Both used to
-  share Arq's default queue, so each worker pulled the other's jobs and dropped them as "function
-  not found" (the matcher never saw its posts). Any new `enqueue_job` call must pass `_queue_name`.
-- `max_tries = 3` — three attempts per job, then it's left for the backfill sweep rather than
-  retried indefinitely.
-
-See [verifier.md](verifier.md) for how the LLM call itself works.
+See [verifier.md](verifier.md) for how the LLM calls work and [ingest.md](ingest.md) for how posts
+reach the queue.

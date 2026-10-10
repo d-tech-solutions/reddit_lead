@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
@@ -14,6 +15,7 @@ from app.models.user import User
 from app.models.watcher import Watcher
 from app.schemas.watcher import WatcherCreate, WatcherRead, WatcherUpdate
 from app.services.limits import LimitExceeded, enforce_limits
+from app.services.queue import enqueue_catchup
 
 router = APIRouter(prefix="/watchers", tags=["watchers"])
 
@@ -66,6 +68,10 @@ async def create_watcher(
     session.add(watcher)
     await session.commit()
     await session.refresh(watcher)
+    # Posts from the hour before this watcher existed are judged by a one-off catch-up job; posts
+    # from `created_at` on reach it through the normal queue.
+    if watcher.status == "active":
+        await enqueue_catchup(watcher.id, list(watcher.subreddits), watcher.created_at)
     return watcher
 
 
@@ -86,6 +92,7 @@ async def update_watcher(
     user: User = Depends(get_current_user),
 ) -> Watcher:
     watcher = await _get_owned_watcher(session, user, watcher_id)
+    added_subreddits: list[str] = []
 
     if payload.subreddits is not None:
         try:
@@ -100,6 +107,7 @@ async def update_watcher(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT, detail=error.message
             ) from error
+        added_subreddits = [s for s in payload.subreddits if s not in watcher.subreddits]
         watcher.subreddits = payload.subreddits
 
     if payload.name is not None:
@@ -113,6 +121,10 @@ async def update_watcher(
 
     await session.commit()
     await session.refresh(watcher)
+    # A subreddit added to an existing watcher gets the same one-hour look-back as a new watcher,
+    # counted from now.
+    if added_subreddits and watcher.status == "active":
+        await enqueue_catchup(watcher.id, added_subreddits, datetime.now(UTC))
     return watcher
 
 

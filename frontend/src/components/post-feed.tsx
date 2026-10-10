@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { Post } from "@/lib/types";
 
-// The paged list of ingested posts, plus the subreddit chip selector shown above it.
+// The paged list of matched posts, plus the subreddit chip selector shown above it.
 //
 // Holds the loaded pages in client state rather than re-rendering the route on every interaction —
 // same reasoning as MatchFeed — so "Load more" survives everything except an actual subreddit
@@ -71,7 +71,7 @@ export function PostFeed({
 
       {items.length === 0 ? (
         <p className="text-sm text-muted-foreground">
-          No posts fetched for this subreddit yet.
+          No matched posts for this subreddit yet.
         </p>
       ) : (
         items.map((post) => <PostCard key={post.id} post={post} />)

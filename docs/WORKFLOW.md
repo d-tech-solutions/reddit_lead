@@ -59,7 +59,7 @@ sequenceDiagram
         M->>L: batched verification call (post + all candidate watcher intents)
         L->>M: per-watcher verdict + reasoning
         loop each verdict
-            M->>DB: write match row (pass or fail, with reasoning)
+            M->>DB: one transaction: store outcome + delete the queued post
             alt confirmed match
                 M->>N: enqueue notification
                 N->>N: send via user's configured channels
@@ -72,7 +72,10 @@ sequenceDiagram
 Notes:
 - One LLM call per post, not one per (post, watcher) pair — the call is batched across every
   active watcher subscribed to that post's subreddit, and returns a verdict per watcher.
-- Every verdict is written to the matches table, pass or fail — rejected candidates are kept as
-  calibration data, not discarded.
+- Only confirmed verdicts become `matches` rows (with the post copied to `matched_posts`).
+  Rejected candidates are counted in `match_stats` and sampled into a 7-day `rejection_log`; the
+  queued post is deleted either way, so `reddit_posts` only ever holds posts awaiting the LLM.
+- A new watcher judges posts made at or after its creation; a one-off catch-up job judges the
+  previous hour (fetched straight from Reddit) against that watcher alone.
 - Large subreddits (many subscribed watchers) split into multiple batched calls rather than one
   unbounded call.

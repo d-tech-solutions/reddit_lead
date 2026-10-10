@@ -20,7 +20,7 @@ from sqlalchemy import Select, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.match import Match
-from app.models.reddit_post import RedditPost
+from app.models.matched_post import MatchedPost
 from app.models.watcher import Watcher
 
 
@@ -62,16 +62,14 @@ def decode_cursor(value: str) -> Cursor:
         raise InvalidCursor("Invalid cursor") from error
 
 
-# Build the base feed query: this user's confirmed matches, with post and watcher attached.
-#
-# `llm_verified.is_(True)` and not a truthiness test — the column is three-valued, and NULL
-# ("verifier has not run") must be excluded just as firmly as False ("verifier said no").
+# Build the base feed query: this user's matches, with post and watcher attached. Every row in
+# `matches` is a confirmed match — rejections are never stored there.
 def _feed_query(user_id: uuid.UUID, watcher_id: uuid.UUID | None) -> Select:
     query = (
-        select(Match, Watcher, RedditPost)
+        select(Match, Watcher, MatchedPost)
         .join(Watcher, Match.watcher_id == Watcher.id)
-        .join(RedditPost, Match.reddit_post_id == RedditPost.id)
-        .where(Watcher.user_id == user_id, Match.llm_verified.is_(True))
+        .join(MatchedPost, Match.matched_post_id == MatchedPost.id)
+        .where(Watcher.user_id == user_id)
     )
     # Note this narrows an already user-scoped query. Filtering on watcher_id *instead of*
     # user_id would let anyone read anyone's feed by guessing an id.
@@ -84,7 +82,7 @@ def _feed_query(user_id: uuid.UUID, watcher_id: uuid.UUID | None) -> Select:
 class FeedRow:
     match: Match
     watcher: Watcher
-    post: RedditPost
+    post: MatchedPost
 
 
 @dataclass(frozen=True)
@@ -134,11 +132,7 @@ async def unread_count(session: AsyncSession, user_id: uuid.UUID) -> int:
         select(func.count())
         .select_from(Match)
         .join(Watcher, Match.watcher_id == Watcher.id)
-        .where(
-            Watcher.user_id == user_id,
-            Match.llm_verified.is_(True),
-            Match.read_at.is_(None),
-        )
+        .where(Watcher.user_id == user_id, Match.read_at.is_(None))
     )
     return int(result.scalar_one())
 
@@ -188,11 +182,7 @@ async def mark_all_read(session: AsyncSession, user_id: uuid.UUID) -> int:
     owned = select(Watcher.id).where(Watcher.user_id == user_id)
     result = await session.execute(
         update(Match)
-        .where(
-            Match.watcher_id.in_(owned),
-            Match.llm_verified.is_(True),
-            Match.read_at.is_(None),
-        )
+        .where(Match.watcher_id.in_(owned), Match.read_at.is_(None))
         .values(read_at=datetime.now(UTC))
     )
     await session.commit()

@@ -23,14 +23,16 @@ than an Arq job, since it's the producer at the head of the pipeline, not a cons
 
 `poll_once()` (ingest.py:71-96):
 
-1. `get_active_subreddits()` (ingest.py:31-34) queries all `Watcher` rows with
-   `status == "active"` and flattens their `subreddits` arrays into a deduplicated, sorted list.
+1. `get_active_subreddits()` selects the distinct `unnest(subreddits)` of active watchers in SQL.
    If no watchers are active, the cycle ends immediately.
-2. For each subreddit, it calls `source.fetch(subreddit, 10)` — pulling the 10 newest posts. A
-   fetch failure for one subreddit is logged and skipped; it doesn't abort the whole cycle.
-3. `store_posts()` (ingest.py:37-51) bulk-inserts the fetched posts with
-   `INSERT ... ON CONFLICT (reddit_post_id) DO NOTHING`, so posts already seen are silently
-   skipped. It returns the ids of only the newly inserted rows.
+2. For each subreddit, it calls `source.fetch_window(subreddit, since, INGEST_MAX_POSTS_PER_POLL)`
+   where `since` is now minus `NEW_WATCHER_LOOKBACK_MINUTES` (60) — posts from the last hour only,
+   never "the latest N whenever they were made". A fetch failure for one subreddit is logged and
+   skipped; it doesn't abort the whole cycle.
+3. `store_posts()` drops anything older than the window (a post with no timestamp is stamped as
+   just posted), inserts the ids into `seen_posts` (`ON CONFLICT DO NOTHING … RETURNING`), and
+   queues only the genuinely new ones in `reddit_posts`. `seen_posts` outlives the queue row, which
+   the matcher deletes once the post is judged, so a judged post is never re-ingested.
 4. `enqueue_for_matching()` (ingest.py:54-68) hands each new post id to Arq as a `match_post`
    job. The job id is derived from the post id (`match_post:{post_id}`), so re-enqueuing the same
    post is a no-op. Enqueue failures are caught and logged per-post, never fatal.
@@ -50,5 +52,6 @@ From [backend/app/workers/reddit_source.py](../../../backend/app/workers/reddit_
 
 ## Net result
 
-Each cycle stores new, previously-unseen posts across every actively-watched subreddit as rows
-in `reddit_post`, each with a matching job already queued for the matcher/LLM-verifier stage.
+Each cycle queues new, previously-unseen, recent posts across every actively-watched subreddit as
+rows in `reddit_posts` (the matcher's work queue), each with a `match_post` job already enqueued.
+See [match.md](match.md) for what happens to them next.

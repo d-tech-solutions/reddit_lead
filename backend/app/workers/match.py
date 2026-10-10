@@ -1,275 +1,360 @@
-"""Matcher worker: ask an LLM whether each active, subscribed watcher matches a new post.
+"""Matcher worker: judge each queued post against the watchers that follow its subreddit.
 
 Runs as an Arq consumer (`arq app.workers.match.WorkerSettings`), triggered by the ingestion
-worker the moment a post is inserted, with a backfill sweep as the safety net — same two-trigger
-shape the pipeline has used throughout (docs/ingestion-worker/README.md §3).
+worker the moment a post is queued, with a backfill sweep as the safety net.
 
-One stage per post: find every active watcher whose subreddit list covers this post (a plain DB
-query, no vector search), then ask the verifier for one verdict per watcher in a single batched
-call (chunked if there are many candidates). Every candidate is written to `matches` whether it
-passes or fails, so the rejected rows stay a record of what the verifier saw and decided.
+`reddit_posts` is the work queue. A worker *claims* a post (a lease, `FOR UPDATE SKIP LOCKED`, so
+several workers never take the same one), asks the verifier for one verdict per candidate watcher,
+then in ONE transaction stores the outcome (`matched_posts` + `matches` for confirmations, counters
+and a short rejection sample for the rest) and deletes the queue row. The LLM calls happen with no
+transaction open. A post that cannot be judged stays queued with a backoff and is dropped after
+MATCH_MAX_ATTEMPTS claims.
+
+This worker also runs the new-watcher catch-up (`catchup_watcher`) and the retention cron.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 from uuid import UUID
 
 from arq import cron
 from arq.connections import ArqRedis, RedisSettings
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import MATCH_QUEUE, NOTIFY_QUEUE, get_settings
+from app.core.config import MATCH_QUEUE, Settings, get_settings
 from app.db.session import async_session_factory
-from app.models.match import Match
 from app.models.reddit_post import RedditPost
 from app.models.watcher import Watcher
+from app.services.retention import run_retention
+from app.workers.outcomes import (
+    Outcome,
+    enqueue_notifications,
+    post_to_dict,
+    store_outcomes,
+)
+from app.workers.reddit_source import PostSource, build_source
 from app.workers.verifier import IntentVerifier, Verdict, build_verifier
 
 logger = logging.getLogger(__name__)
 
+# (watcher id, intent text) — all the matcher needs of a watcher, without holding ORM rows across
+# the commits and LLM calls that follow.
+Candidate = tuple[UUID, str]
 
-async def fetch_candidate_watchers(session: AsyncSession, subreddit: str) -> list[Watcher]:
-    """Load active watchers whose subreddit list covers this post.
+# Seconds a failed post waits per attempt before it can be claimed again.
+RETRY_BACKOFF_SECONDS = 30
 
-    Filtering in SQL keeps the candidate set small before anything is sent to the LLM.
+
+async def fetch_candidate_watchers(
+    session: AsyncSession, subreddit: str, eligible_at: datetime
+) -> list[Candidate]:
+    """Active watchers that follow this subreddit and existed when the post was made.
+
+    A watcher only judges posts made at or after its creation: the hour before it was created is
+    the catch-up job's job, so the two never judge the same post. The `@>` containment test is what
+    lets the GIN index on `watchers.subreddits` serve this lookup.
     """
     result = await session.execute(
-        select(Watcher).where(
+        select(Watcher.id, Watcher.intent_text).where(
             Watcher.status == "active",
-            Watcher.subreddits.any(subreddit),
+            Watcher.subreddits.contains([subreddit]),
+            Watcher.created_at <= eligible_at,
         )
     )
-    return list(result.scalars())
+    return [(watcher_id, intent_text) for watcher_id, intent_text in result.all()]
 
 
-def chunk_watchers(watchers: list[Watcher], batch_size: int) -> list[list[Watcher]]:
+def chunk_candidates(candidates: list[Candidate], batch_size: int) -> list[list[Candidate]]:
     """Split candidates into fixed-size groups so one busy subreddit isn't one oversized call."""
-    return [watchers[index : index + batch_size] for index in range(0, len(watchers), batch_size)]
+    return [candidates[index : index + batch_size] for index in range(0, len(candidates), batch_size)]
 
 
-async def store_placeholder_matches(
-    session: AsyncSession, post_id: UUID, watcher_ids: list[UUID]
-) -> list[UUID]:
-    """Write one placeholder row per (watcher, post), skipping pairs already recorded.
+async def _lease(session: AsyncSession, posts: list[RedditPost], claim_seconds: int) -> None:
+    """Mark claimed posts as owned for `claim_seconds` and count the attempt."""
+    locked_until = datetime.now(UTC) + timedelta(seconds=claim_seconds)
+    for post in posts:
+        post.locked_until = locked_until
+        post.attempts = (post.attempts or 0) + 1
+    await session.commit()
 
-    `llm_verified` stays NULL until a verdict is applied — a job that dies mid-batch leaves a clean
-    trail the backfill sweep already knows how to find.
-    """
-    if not watcher_ids:
-        return []
 
-    rows = [{"watcher_id": watcher_id, "reddit_post_id": post_id} for watcher_id in watcher_ids]
-    statement = (
-        insert(Match)
-        .values(rows)
-        .on_conflict_do_nothing(constraint="uq_matches_pair")
-        .returning(Match.id)
+def _claimable() -> Any:
+    """SQL condition: the post is free, or its previous lease has run out."""
+    return or_(RedditPost.locked_until.is_(None), RedditPost.locked_until < datetime.now(UTC))
+
+
+async def claim_post(session: AsyncSession, post_id: UUID, claim_seconds: int) -> RedditPost | None:
+    """Claim one specific queued post, or None if it is gone or another worker holds it."""
+    result = await session.execute(
+        select(RedditPost)
+        .where(RedditPost.id == post_id, _claimable())
+        .with_for_update(skip_locked=True)
     )
-    result = await session.execute(statement)
-    inserted = list(result.scalars().all())
+    post = result.scalar_one_or_none()
+    if post is not None:
+        await _lease(session, [post], claim_seconds)
+    return post
+
+
+async def claim_stale_posts(
+    session: AsyncSession, limit: int, min_age_seconds: int, claim_seconds: int
+) -> list[RedditPost]:
+    """Claim the oldest claimable posts that the ingest-time job has had a fair chance to take."""
+    old_enough = datetime.now(UTC) - timedelta(seconds=min_age_seconds)
+    result = await session.execute(
+        select(RedditPost)
+        .where(_claimable(), RedditPost.fetched_at < old_enough)
+        .order_by(RedditPost.fetched_at)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    posts = list(result.scalars())
+    if posts:
+        await _lease(session, posts, claim_seconds)
+    return posts
+
+
+async def drop_post(session: AsyncSession, post_id: UUID) -> None:
+    """Remove a post from the queue; its id stays in `seen_posts`, so it is not re-ingested."""
+    await session.execute(delete(RedditPost).where(RedditPost.id == post_id))
     await session.commit()
-    return inserted
 
 
-async def apply_verdicts(session: AsyncSession, post_id: UUID, verdicts: list[Verdict]) -> int:
-    """Write a batch of verdicts onto their match rows, one commit for the whole batch.
+async def purge_exhausted(session: AsyncSession, max_attempts: int) -> int:
+    """Drop queued posts that have used up their attempts — typically a worker that kept dying."""
+    result = await session.execute(
+        delete(RedditPost).where(RedditPost.attempts >= max_attempts, _claimable())
+    )
+    await session.commit()
+    dropped = result.rowcount or 0
+    if dropped:
+        logger.error("match: dropped %d post(s) that exhausted %d attempts", dropped, max_attempts)
+    return dropped
 
-    Skips a verdict whose row is missing or already judged, so a retried batch is idempotent.
-    """
-    if not verdicts:
-        return 0
 
-    confirmed = 0
-    now = datetime.now(UTC)
-    for verdict in verdicts:
-        result = await session.execute(
-            select(Match).where(
-                Match.reddit_post_id == post_id,
-                Match.watcher_id == verdict.watcher_id,
-                Match.llm_verified.is_(None),
-            )
+async def _release(session: AsyncSession, post_id: UUID, attempts: int) -> None:
+    """Put a post back in the queue, claimable after a backoff that grows with each attempt."""
+    post = await session.get(RedditPost, post_id)
+    if post is not None:
+        post.locked_until = datetime.now(UTC) + timedelta(
+            seconds=RETRY_BACKOFF_SECONDS * max(1, attempts)
         )
-        match = result.scalar_one_or_none()
-        if match is None:
-            continue
-
-        match.llm_verified = verdict.matches
-        match.llm_reason = verdict.reason
-        match.llm_model = verdict.model
-        match.verified_at = now
-        if verdict.matches:
-            confirmed += 1
-
-    await session.commit()
-    return confirmed
+        await session.commit()
 
 
-async def _verify_and_apply(
+async def _collect_verdicts(
+    verifier: IntentVerifier, post: RedditPost, candidates: list[Candidate], batch_size: int
+) -> tuple[dict[UUID, Verdict], bool]:
+    """Ask the verifier about every candidate; returns (verdicts by watcher, all-succeeded).
+
+    Stops at the first failed chunk — the whole post is retried, so spending more on the remaining
+    chunks now would just be repeated.
+    """
+    verdicts: dict[UUID, Verdict] = {}
+    for chunk in chunk_candidates(candidates, batch_size):
+        try:
+            batch = await verifier.verify_batch(post.title, post.body or "", chunk)
+        except Exception:
+            logger.exception(
+                "verify: post=%s batch of %d watchers failed",
+                post.reddit_post_id,
+                len(chunk),
+            )
+            return verdicts, False
+        allowed = {watcher_id for watcher_id, _ in chunk}
+        for verdict in batch:
+            if verdict.watcher_id in allowed:
+                verdicts.setdefault(verdict.watcher_id, verdict)
+    return verdicts, len(verdicts) == len(candidates)
+
+
+async def process_post(
     session: AsyncSession,
     verifier: IntentVerifier,
+    settings: Settings,
     post: RedditPost,
-    watchers: list[Watcher],
+    redis: ArqRedis | None = None,
 ) -> int:
-    """Ask the verifier about one chunk of candidates and apply the verdicts.
+    """Judge one claimed post and settle it; returns how many matches were confirmed.
 
-    A failed chunk is logged and left NULL — the backfill sweep retries it — rather than failing
-    the whole post.
+    Settling is atomic: the outcome is stored and the queue row deleted in one transaction.
     """
-    candidates = [(watcher.id, watcher.intent_text) for watcher in watchers]
-    try:
-        verdicts = await verifier.verify_batch(post.title, post.body or "", candidates)
-    except Exception:
-        logger.exception(
-            "verify: post=%s batch of %d watchers failed, left for backfill",
-            post.reddit_post_id,
-            len(watchers),
-        )
-        return 0
+    post_id, attempts = post.id, post.attempts
+    fields = post_to_dict(post)
+    eligible_at = post.posted_at or post.fetched_at
 
-    confirmed = await apply_verdicts(session, post.id, verdicts)
+    candidates = await fetch_candidate_watchers(session, post.subreddit, eligible_at)
+    if not candidates:
+        await drop_post(session, post_id)
+        return 0
+    # End the read transaction so none is held open across the network calls below.
+    await session.commit()
+
+    verdicts, complete = await _collect_verdicts(
+        verifier, post, candidates, settings.MATCH_BATCH_SIZE
+    )
+
+    if not complete:
+        if attempts < settings.MATCH_MAX_ATTEMPTS:
+            await _release(session, post_id, attempts)
+            return 0
+        logger.error(
+            "match: post=%s incomplete after %d attempts, settling with %d of %d verdicts",
+            post.reddit_post_id,
+            attempts,
+            len(verdicts),
+            len(candidates),
+        )
+        if not verdicts:
+            await drop_post(session, post_id)
+            return 0
+
+    outcomes = [
+        Outcome(
+            watcher_id=verdict.watcher_id,
+            post=fields,
+            matches=verdict.matches,
+            reason=verdict.reason,
+            model=verdict.model,
+        )
+        for verdict in verdicts.values()
+    ]
+    new_match_ids = await store_outcomes(session, outcomes)
+    await session.execute(delete(RedditPost).where(RedditPost.id == post_id))
+    await session.commit()
+
     logger.info(
         "verify: post=%s watchers=%d verdicts=%d confirmed=%d",
-        post.reddit_post_id,
-        len(watchers),
+        fields["reddit_post_id"],
+        len(candidates),
         len(verdicts),
-        confirmed,
+        len(new_match_ids),
     )
-    return confirmed
-
-
-async def enqueue_notifications(
-    redis: ArqRedis | None, session: AsyncSession, post_id: UUID
-) -> None:
-    """Hand this post's confirmed, un-notified matches to the notify worker.
-
-    Best-effort: a failed enqueue is logged and left to the notify worker's own backfill sweep,
-    never allowed to fail the matching job.
-    """
-    if redis is None:
-        return
-    result = await session.execute(
-        select(Match.id).where(
-            Match.reddit_post_id == post_id,
-            Match.llm_verified.is_(True),
-            Match.notified_at.is_(None),
-        )
-    )
-    for match_id in result.scalars():
-        try:
-            # A job id derived from the match id makes a duplicate enqueue a no-op.
-            await redis.enqueue_job(
-                "notify_match",
-                str(match_id),
-                _job_id=f"notify_match:{match_id}",
-                _queue_name=NOTIFY_QUEUE,
-            )
-        except Exception:
-            logger.exception("match: failed enqueueing notify job for match %s", match_id)
+    await enqueue_notifications(redis, new_match_ids)
+    return len(new_match_ids)
 
 
 async def match_post(ctx: dict[str, Any], post_id: str) -> int:
-    """Arq job: judge one post against every active watcher subscribed to its subreddit.
-
-    Enqueued by the ingestion worker the moment a post is inserted.
-    """
-    verifier: IntentVerifier = ctx["verifier"]
-    settings = ctx["settings"]
-
+    """Arq job: judge one queued post. Enqueued by the ingestion worker when a post is queued."""
+    settings: Settings = ctx["settings"]
     async with async_session_factory() as session:
-        post = await session.get(RedditPost, UUID(post_id))
+        post = await claim_post(session, UUID(post_id), settings.MATCH_CLAIM_SECONDS)
         if post is None:
-            logger.warning("match_post: post %s no longer exists", post_id)
+            # Already judged, or another worker (or the sweep) has it.
             return 0
-
-        watchers = await fetch_candidate_watchers(session, post.subreddit)
-        if not watchers:
-            return 0
-
-        await store_placeholder_matches(session, post.id, [watcher.id for watcher in watchers])
-
-        confirmed = 0
-        for chunk in chunk_watchers(watchers, settings.MATCH_BATCH_SIZE):
-            confirmed += await _verify_and_apply(session, verifier, post, chunk)
-
-        if confirmed:
-            await enqueue_notifications(ctx.get("redis"), session, post.id)
-
-    return confirmed
-
-
-async def fetch_unverified_by_post(session: AsyncSession, limit: int) -> dict[UUID, list[UUID]]:
-    """Load unverified candidate rows, oldest first, grouped by post for one batched call each."""
-    result = await session.execute(
-        select(Match.reddit_post_id, Match.watcher_id)
-        .where(Match.llm_verified.is_(None))
-        .order_by(Match.created_at)
-        .limit(limit)
-    )
-    grouped: dict[UUID, list[UUID]] = {}
-    for post_id, watcher_id in result.all():
-        grouped.setdefault(post_id, []).append(watcher_id)
-    return grouped
-
-
-async def fetch_unmatched_posts(session: AsyncSession, limit: int) -> list[RedditPost]:
-    """Load posts with no `matches` row at all — ones a `match_post` job never ran for (enqueue
-    failure, or a job that exhausted its retries).
-
-    A post in a subreddit nobody watches produces no candidates and so is re-checked every sweep;
-    that's cheap and also correct, since a watcher added later should still pick it up.
-    """
-    has_matches = select(Match.reddit_post_id).where(Match.reddit_post_id == RedditPost.id)
-    result = await session.execute(
-        select(RedditPost)
-        .where(~has_matches.exists())
-        .order_by(RedditPost.fetched_at)
-        .limit(limit)
-    )
-    return list(result.scalars())
+        return await process_post(session, ctx["verifier"], settings, post, ctx.get("redis"))
 
 
 async def backfill(ctx: dict[str, Any]) -> int:
-    """Arq cron job: catch candidates whose verification never completed, and posts no job ever
-    ran for."""
+    """Arq cron job: judge queued posts whose ingest-time job never ran or never finished."""
+    settings: Settings = ctx["settings"]
     verifier: IntentVerifier = ctx["verifier"]
-    settings = ctx["settings"]
 
     handled = 0
     async with async_session_factory() as session:
-        # Unjudged candidates first: already-paid-for placeholder rows waiting on a verdict.
-        unverified = await fetch_unverified_by_post(session, settings.MATCH_BACKFILL_LIMIT)
-        for post_id, watcher_ids in unverified.items():
-            post = await session.get(RedditPost, post_id)
-            if post is None:
-                continue
-            watchers = [
-                watcher
-                for watcher_id in watcher_ids
-                if (watcher := await session.get(Watcher, watcher_id)) is not None
-            ]
-            if not watchers:
-                continue
-            for chunk in chunk_watchers(watchers, settings.MATCH_BATCH_SIZE):
-                await _verify_and_apply(session, verifier, post, chunk)
-                handled += len(chunk)
-
-        for post in await fetch_unmatched_posts(session, settings.MATCH_BACKFILL_LIMIT):
-            watchers = await fetch_candidate_watchers(session, post.subreddit)
-            if not watchers:
-                continue
-            await store_placeholder_matches(session, post.id, [w.id for w in watchers])
-            for chunk in chunk_watchers(watchers, settings.MATCH_BATCH_SIZE):
-                await _verify_and_apply(session, verifier, post, chunk)
-                handled += len(chunk)
+        await purge_exhausted(session, settings.MATCH_MAX_ATTEMPTS)
+        posts = await claim_stale_posts(
+            session,
+            settings.MATCH_BACKFILL_LIMIT,
+            settings.MATCH_BACKFILL_MIN_AGE_SECONDS,
+            settings.MATCH_CLAIM_SECONDS,
+        )
+        for post in posts:
+            try:
+                await process_post(session, verifier, settings, post, ctx.get("redis"))
+                handled += 1
+            except Exception:
+                logger.exception("match backfill: post=%s failed", post.reddit_post_id)
+                await session.rollback()
 
     if handled:
         logger.info("match backfill: handled=%d", handled)
     return handled
+
+
+async def catchup_watcher(
+    ctx: dict[str, Any], watcher_id: str, subreddits: list[str], until: str
+) -> int:
+    """Arq job: judge the hour of posts before a watcher (or a newly added subreddit) existed.
+
+    Covers [until - NEW_WATCHER_LOOKBACK_MINUTES, until). Posts from `until` onward reach the
+    watcher through the normal queue, so the two windows never overlap. Fetches straight from
+    Reddit because anything in that hour that nobody matched has already been deleted here.
+    Capped at CATCHUP_MAX_POSTS per subreddit; returns how many matches were confirmed.
+    """
+    settings: Settings = ctx["settings"]
+    verifier: IntentVerifier = ctx["verifier"]
+    source: PostSource = ctx["source"]
+
+    until_at = datetime.fromisoformat(until)
+    since = until_at - timedelta(minutes=settings.NEW_WATCHER_LOOKBACK_MINUTES)
+    new_match_ids = []
+
+    async with async_session_factory() as session:
+        watcher = await session.get(Watcher, UUID(watcher_id))
+        if watcher is None or watcher.status != "active":
+            return 0
+        intent_text = watcher.intent_text
+        owned_id = watcher.id
+        await session.commit()
+
+        for subreddit in subreddits:
+            try:
+                fetched = await source.fetch_window(
+                    subreddit, since, settings.CATCHUP_MAX_POSTS + 20
+                )
+            except Exception:
+                logger.exception("catchup: failed fetching r/%s", subreddit)
+                continue
+
+            posts: dict[str, dict[str, Any]] = {}
+            for post in fetched:
+                posted_at = post.get("posted_at")
+                # No timestamp means we can't tell it from a post made after `until`: skip it.
+                if posted_at is not None and posted_at < until_at:
+                    posts.setdefault(post["reddit_post_id"], post)
+            window = list(posts.values())[: settings.CATCHUP_MAX_POSTS]
+
+            for start in range(0, len(window), settings.CATCHUP_BATCH_SIZE):
+                chunk = window[start : start + settings.CATCHUP_BATCH_SIZE]
+                try:
+                    verdicts = await verifier.verify_posts(
+                        intent_text,
+                        [(p["reddit_post_id"], p["title"], p.get("body") or "") for p in chunk],
+                    )
+                except Exception:
+                    logger.exception("catchup: r/%s batch of %d posts failed", subreddit, len(chunk))
+                    continue
+
+                outcomes = [
+                    Outcome(
+                        watcher_id=owned_id,
+                        post=posts[verdict.reddit_post_id],
+                        matches=verdict.matches,
+                        reason=verdict.reason,
+                        model=verdict.model,
+                    )
+                    for verdict in verdicts
+                    if verdict.reddit_post_id in posts
+                ]
+                new_match_ids.extend(await store_outcomes(session, outcomes))
+                await session.commit()
+
+    logger.info(
+        "catchup: watcher=%s subreddits=%s confirmed=%d", watcher_id, subreddits, len(new_match_ids)
+    )
+    await enqueue_notifications(ctx.get("redis"), new_match_ids)
+    return len(new_match_ids)
+
+
+async def retention(ctx: dict[str, Any]) -> dict[str, int]:
+    """Arq cron job: prune dedup memory, the rejection sample, and inactive users' matches."""
+    async with async_session_factory() as session:
+        return await run_retention(session, ctx["settings"])
 
 
 def backfill_minutes(interval_minutes: int) -> set[int]:
@@ -281,7 +366,7 @@ def backfill_minutes(interval_minutes: int) -> set[int]:
 
 
 async def startup(ctx: dict[str, Any]) -> None:
-    """Arq startup hook: build the verifier once per worker process rather than per job."""
+    """Arq startup hook: build the verifier and Reddit source once per worker process."""
     settings = get_settings()
     logging.basicConfig(
         level=settings.LOG_LEVEL,
@@ -289,6 +374,12 @@ async def startup(ctx: dict[str, Any]) -> None:
     )
     ctx["settings"] = settings
     ctx["verifier"] = build_verifier(settings.OPENAI_API_KEY, settings.VERIFIER_MODEL)
+    ctx["source"] = build_source(
+        settings.REDDIT_FETCH_MODE,
+        settings.REDDIT_CLIENT_ID,
+        settings.REDDIT_CLIENT_SECRET,
+        settings.REDDIT_USER_AGENT,
+    )
 
     logger.info(
         "matcher starting: verifier=%s batch_size=%d backfill_every=%dm",
@@ -299,23 +390,28 @@ async def startup(ctx: dict[str, Any]) -> None:
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:
-    """Arq shutdown hook: close the verifier's HTTP client so the process exits cleanly."""
+    """Arq shutdown hook: close the verifier's and source's HTTP clients so the process exits."""
     verifier = ctx.get("verifier")
     if verifier is not None:
         await verifier.close()
+    source = ctx.get("source")
+    if source is not None:
+        await source.close()
 
 
 _settings = get_settings()
 
 
 class WorkerSettings:
-    functions: ClassVar[list[Any]] = [match_post]
+    functions: ClassVar[list[Any]] = [match_post, catchup_watcher]
     cron_jobs: ClassVar[list[Any]] = [
         cron(
             backfill,
             minute=backfill_minutes(_settings.MATCH_BACKFILL_INTERVAL_MINUTES),
             run_at_startup=True,
-        )
+        ),
+        # Hourly, off the sweep's minutes.
+        cron(retention, minute={17}),
     ]
     on_startup = startup
     on_shutdown = shutdown

@@ -38,8 +38,8 @@ export default async function PostsPage({
       <header className="grid gap-1">
         <h1 className="text-2xl font-semibold">Posts</h1>
         <p className="text-sm text-muted-foreground">
-          Everything the ingestion worker has pulled across every subreddit any watcher follows —
-          this is what gets sent to the AI verifier for analysis, newest fetched first.
+          Every post the AI verifier confirmed for at least one watcher, across every subreddit any
+          watcher follows, newest first. Posts nobody matched are discarded once judged.
         </p>
       </header>
 
@@ -61,10 +61,10 @@ export default async function PostsPage({
       ) : result.page.subreddits.length === 0 ? (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Nothing ingested yet</CardTitle>
+            <CardTitle className="text-base">No watchers yet</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-muted-foreground">
-            Posts show up here once at least one watcher exists somewhere in the app.
+            Matched posts show up here once at least one watcher exists somewhere in the app.
           </CardContent>
         </Card>
       ) : (

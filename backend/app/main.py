@@ -1,15 +1,26 @@
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import get_settings
+from app.services.queue import close_pool
 
 settings = get_settings()
 
-# No Arq pool here: the API no longer enqueues anything directly. A new watcher becomes visible to
-# the matcher on the next ingestion cycle purely by existing (no embedding to trigger), and editing
-# `intent_text` takes effect on the very next post the matcher considers.
-app = FastAPI(title="PostPing API")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    yield
+    await close_pool()
+
+
+# The only thing the API enqueues is the new-watcher catch-up job (services/queue.py); the Arq pool
+# is created lazily on first use and closed here. Editing `intent_text` still takes effect on the
+# very next post the matcher considers.
+app = FastAPI(title="PostPing API", lifespan=lifespan)
 
 if settings.cors_origins:
     app.add_middleware(

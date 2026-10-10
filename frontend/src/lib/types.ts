@@ -78,8 +78,9 @@ export interface MatchPage {
   unread: number;
 }
 
-// A raw ingested post — unlike `MatchPost`, this carries the body, since the posts feed has
-// nowhere else to show it.
+// A matched post (one the AI verifier confirmed for at least one watcher) — unlike `MatchPost`,
+// this carries the body, since the posts feed has nowhere else to show it. Posts nobody matched
+// are deleted once judged and never appear here.
 export interface Post {
   id: string;
   reddit_post_id: string;
@@ -90,7 +91,7 @@ export interface Post {
   permalink: string;
   // Null when the fetch mode did not supply one — the RSS source sometimes omits it.
   posted_at: string | null;
-  // When the ingestion worker stored this row, as opposed to when Reddit says it was posted.
+  // When the ingestion worker first stored this post, as opposed to when Reddit says it was posted.
   fetched_at: string;
 }
 
@@ -98,8 +99,7 @@ export interface PostPage {
   items: Post[];
   // Null on the last page. Pass it back as `?cursor=` to get the next one.
   next_cursor: string | null;
-  // Every subreddit the caller can filter to — the union across their watchers, not just the
-  // ones with a post on this page.
+  // Every subreddit any watcher follows — not just the ones with a post on this page.
   subreddits: string[];
 }
 
@@ -139,7 +139,6 @@ export interface Billing {
 export interface VerdictTotals {
   confirmed: number;
   rejected: number;
-  pending: number;
   pass_rate: number | null;
 }
 
@@ -166,10 +165,23 @@ export interface WatcherStat {
   last_match_at: string | null;
 }
 
+// One recently rejected candidate, from a short-lived sample — not a permanent record.
+export interface RejectionRead {
+  watcher_id: string;
+  watcher_name: string;
+  subreddit: string;
+  title: string;
+  permalink: string;
+  reason: string;
+  rejected_at: string;
+}
+
 export interface Analytics {
   days: number;
   totals: VerdictTotals;
   daily: DailyCount[];
   top_subreddits: SubredditStat[];
   watchers: WatcherStat[];
+  // Newest first, capped; empty once the sample has aged out.
+  recent_rejections: RejectionRead[];
 }

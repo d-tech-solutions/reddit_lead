@@ -31,6 +31,7 @@ from app.core.crypto import (
 )
 from app.db.session import async_session_factory
 from app.models.match import Match
+from app.models.matched_post import MatchedPost
 from app.models.notification_channel import NotificationChannel
 from app.models.notification_delivery import (
     DELIVERY_FAILED,
@@ -39,7 +40,6 @@ from app.models.notification_delivery import (
     DELIVERY_TERMINAL,
     NotificationDelivery,
 )
-from app.models.reddit_post import RedditPost
 from app.models.user import User
 from app.models.watcher import Watcher
 from app.notifiers import build_notifiers
@@ -138,10 +138,10 @@ async def notify_match(ctx: dict[str, Any], match_id: str) -> int:
 
     async with async_session_factory() as session:
         match = await session.get(Match, UUID(match_id))
-        if match is None or match.llm_verified is not True:
+        if match is None:
             return 0
 
-        post = await session.get(RedditPost, match.reddit_post_id)
+        post = await session.get(MatchedPost, match.matched_post_id)
         watcher = await session.get(Watcher, match.watcher_id)
         if post is None or watcher is None or watcher.status != "active":
             return 0
@@ -226,12 +226,11 @@ async def fetch_pending_match_ids(session: AsyncSession, window_hours: int, limi
     result = await session.execute(
         select(Match.id)
         .where(
-            Match.llm_verified.is_(True),
             Match.notified_at.is_(None),
-            Match.verified_at >= cutoff,
+            Match.created_at >= cutoff,
             ~settled.exists(),
         )
-        .order_by(Match.verified_at)
+        .order_by(Match.created_at)
         .limit(limit)
     )
     return list(result.scalars())

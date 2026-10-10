@@ -9,11 +9,12 @@ unverified token.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 
 from clerk_backend_api.security import VerifyTokenOptions, verify_token_async
 from clerk_backend_api.security.types import TokenVerificationError
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -114,6 +115,23 @@ async def get_or_create_user(
     return user
 
 
+# Record that this user is active, at most once per `LAST_ACTIVE_TOUCH_MINUTES`.
+#
+# Throttled so a busy dashboard doesn't turn every request into a write. Reads `__dict__` rather
+# than the attribute: a just-created row may not have the column loaded, and a lazy load inside an
+# async session raises. `updated_at` is set to itself so this doesn't count as a profile change.
+async def touch_last_active(session: AsyncSession, user: User, settings: Settings) -> None:
+    now = datetime.now(UTC)
+    last = user.__dict__.get("last_active_at")
+    if last is not None and now - last < timedelta(minutes=settings.LAST_ACTIVE_TOUCH_MINUTES):
+        return
+    await session.execute(
+        update(User).where(User.id == user.id).values(last_active_at=now, updated_at=User.updated_at)
+    )
+    await session.commit()
+    user.last_active_at = now
+
+
 # The dependency endpoints actually use: a verified, persisted `User` for the calling request.
 async def get_current_user(
     request: Request,
@@ -137,6 +155,7 @@ async def get_current_user(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This account has been deactivated.",
         )
+    await touch_last_active(session, user, settings)
     return user
 
 

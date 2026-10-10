@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from app.models.match import Match
-from app.models.reddit_post import RedditPost
+from app.models.matched_post import MatchedPost
 from app.models.watcher import Watcher
 
 # Enough of the post body to recognise it; the full text is one click away on Reddit.
@@ -56,7 +56,7 @@ def make_snippet(body: str) -> str:
 
 
 def build_message(
-    match: Match, post: RedditPost, watcher: Watcher, frontend_url: str
+    match: Match, post: MatchedPost, watcher: Watcher, frontend_url: str
 ) -> NotificationMessage:
     """Assemble the channel-neutral message for one confirmed match."""
     permalink = post.permalink

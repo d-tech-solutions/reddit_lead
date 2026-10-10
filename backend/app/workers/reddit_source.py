@@ -22,6 +22,12 @@ RSS_URL = "https://www.reddit.com/r/{subreddit}/new/.rss"
 class PostSource(Protocol):
     async def fetch(self, subreddit: str, limit: int) -> list[dict[str, Any]]: ...
 
+    async def fetch_window(
+        self, subreddit: str, since: datetime, limit: int
+    ) -> list[dict[str, Any]]:
+        """Newest-first posts posted at or after `since`, at most `limit` of them."""
+        ...
+
     async def close(self) -> None: ...
 
 
@@ -36,6 +42,8 @@ def _parse_rss_entry(entry: Any, subreddit: str) -> dict[str, Any] | None:
     if getattr(entry, "updated", None):
         try:
             posted_at = datetime.fromisoformat(entry.updated)
+            if posted_at.tzinfo is None:
+                posted_at = posted_at.replace(tzinfo=UTC)
         except ValueError:
             posted_at = None
 
@@ -69,8 +77,19 @@ class RssSource:
         posts = [_parse_rss_entry(entry, subreddit) for entry in feed.entries[:limit]]
         return [post for post in posts if post is not None]
 
+    async def fetch_window(
+        self, subreddit: str, since: datetime, limit: int
+    ) -> list[dict[str, Any]]:
+        posts = await self.fetch(subreddit, limit)
+        return _within_window(posts, since)[:limit]
+
     async def close(self) -> None:
         await self._client.aclose()
+
+
+def _within_window(posts: list[dict[str, Any]], since: datetime) -> list[dict[str, Any]]:
+    """Keep posts posted at or after `since`; a post with no timestamp is kept (treated as fresh)."""
+    return [post for post in posts if post["posted_at"] is None or post["posted_at"] >= since]
 
 
 def _parse_submission(submission: Any, subreddit: str) -> dict[str, Any]:
@@ -101,6 +120,19 @@ class ApiSource:
     async def fetch(self, subreddit: str, limit: int) -> list[dict[str, Any]]:
         sub = await self._reddit.subreddit(subreddit)
         return [_parse_submission(s, subreddit) async for s in sub.new(limit=limit)]
+
+    async def fetch_window(
+        self, subreddit: str, since: datetime, limit: int
+    ) -> list[dict[str, Any]]:
+        sub = await self._reddit.subreddit(subreddit)
+        posts: list[dict[str, Any]] = []
+        # `new` is newest-first, so the first post older than `since` ends the useful part.
+        async for submission in sub.new(limit=limit):
+            post = _parse_submission(submission, subreddit)
+            if post["posted_at"] is not None and post["posted_at"] < since:
+                break
+            posts.append(post)
+        return posts
 
     async def close(self) -> None:
         await self._reddit.close()

@@ -9,43 +9,84 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from arq import create_pool
 from arq.connections import ArqRedis, RedisSettings
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import MATCH_QUEUE, get_settings
 from app.db.session import async_session_factory
 from app.models.reddit_post import RedditPost
+from app.models.seen_post import SeenPost
 from app.models.watcher import Watcher
 from app.workers.reddit_source import PostSource, build_source
 
 logger = logging.getLogger(__name__)
 
-POSTS_PER_FETCH = 10
-
 
 async def get_active_subreddits(session: AsyncSession) -> list[str]:
-    result = await session.execute(select(Watcher.subreddits).where(Watcher.status == "active"))
-    distinct = {sub for row in result.scalars() for sub in row}
-    return sorted(distinct)
+    """Distinct subreddits any active watcher follows, computed in SQL (no row-per-watcher load)."""
+    result = await session.execute(
+        select(func.unnest(Watcher.subreddits)).where(Watcher.status == "active").distinct()
+    )
+    return sorted(result.scalars())
+
+
+def drop_stale_posts(
+    posts: list[dict[str, Any]], max_age: timedelta, now: datetime | None = None
+) -> list[dict[str, Any]]:
+    """Drop posts older than `max_age`; a post with no timestamp is stamped as just posted."""
+    now = now or datetime.now(UTC)
+    cutoff = now - max_age
+    fresh: list[dict[str, Any]] = []
+    for post in posts:
+        posted_at = post.get("posted_at")
+        if posted_at is None:
+            post = {**post, "posted_at": now}
+        elif posted_at < cutoff:
+            continue
+        fresh.append(post)
+    return fresh
 
 
 async def store_posts(session: AsyncSession, posts: list[dict[str, Any]]) -> list[uuid.UUID]:
-    """Insert posts, skipping ones already stored; returns ids of the newly inserted rows."""
+    """Queue posts the pipeline has never seen; returns the ids of the newly queued rows.
+
+    `seen_posts` is the dedup memory: it outlives the queue row (which is deleted once the post is
+    judged), so a post is queued at most once per retention window. Posts older than the freshness
+    window are never queued.
+    """
+    posts = drop_stale_posts(
+        posts, timedelta(minutes=get_settings().NEW_WATCHER_LOOKBACK_MINUTES)
+    )
     if not posts:
         return []
 
-    statement = (
+    # Duplicate ids inside one batch would make the multi-row insert fail on its own conflict.
+    unique = list({post["reddit_post_id"]: post for post in posts}.values())
+
+    seen = await session.execute(
+        insert(SeenPost)
+        .values([{"reddit_post_id": post["reddit_post_id"]} for post in unique])
+        .on_conflict_do_nothing(index_elements=["reddit_post_id"])
+        .returning(SeenPost.reddit_post_id)
+    )
+    new_ids = set(seen.scalars().all())
+    new_posts = [post for post in unique if post["reddit_post_id"] in new_ids]
+    if not new_posts:
+        await session.commit()
+        return []
+
+    result = await session.execute(
         insert(RedditPost)
-        .values(posts)
+        .values(new_posts)
         .on_conflict_do_nothing(index_elements=["reddit_post_id"])
         .returning(RedditPost.id)
     )
-    result = await session.execute(statement)
     inserted = list(result.scalars().all())
     await session.commit()
     return inserted
@@ -83,10 +124,13 @@ async def poll_once(
         logger.info("ingest cycle: no active watchers, nothing to poll")
         return 0
 
+    settings = get_settings()
+    since = datetime.now(UTC) - timedelta(minutes=settings.NEW_WATCHER_LOOKBACK_MINUTES)
+
     total_new = 0
     for subreddit in subreddits:
         try:
-            posts = await source.fetch(subreddit, POSTS_PER_FETCH)
+            posts = await source.fetch_window(subreddit, since, settings.INGEST_MAX_POSTS_PER_POLL)
         except Exception:
             logger.exception("ingest: failed fetching r/%s", subreddit)
             continue
