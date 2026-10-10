@@ -1,58 +1,75 @@
-import { useAuthStore } from '../stores/useAuthStore';
+import "server-only";
 
-// In production, configure through Vercel environment variables
-const API_BASE_URL = typeof window !== 'undefined' && window.location.hostname !== 'localhost'
-  ? 'https://your-backend-api-production.com'  // production fallback
-  : 'http://localhost:8000';
+import { auth } from "@clerk/nextjs/server";
 
-interface RequestOptions extends RequestInit {
-  json?: any;
+// Server-side base URL. Inside docker-compose the API is reachable as `api`, not `localhost`, so
+// this is deliberately NOT the NEXT_PUBLIC_ variable — that one is baked into the browser bundle
+// and would point at the wrong host from inside the container.
+const API_BASE_URL =
+  process.env.API_BASE_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+const API_V1_PREFIX = "/api/v1";
+
+// Thrown for any non-2xx response, carrying the status so callers can tell a 409 (plan limit,
+// worth showing the user) from a 500 (worth logging).
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
 }
 
-export async function apiRequest<T = any>(path: string, options: RequestOptions = {}): Promise<T> {
-  const token = useAuthStore.getState().token;
-  
-  const headers = new Headers(options.headers || {});
-  
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`);
+// Pull the detail string out of FastAPI's error body, falling back to the status text.
+// FastAPI returns `{detail: "..."}` for HTTPException and `{detail: [...]}` for validation errors.
+async function errorMessage(response: Response): Promise<string> {
+  try {
+    const body = await response.json();
+    if (typeof body?.detail === "string") return body.detail;
+    if (Array.isArray(body?.detail)) {
+      const first = body.detail[0];
+      return first?.msg ? `${first.msg}${first.loc ? ` (${first.loc.join(".")})` : ""}` : "Invalid request";
+    }
+  } catch {
+    // Body was not JSON — fall through to the status line.
   }
-  
-  if (options.json) {
-    headers.set('Content-Type', 'application/json');
-    options.body = JSON.stringify(options.json);
+  return response.statusText || `Request failed with status ${response.status}`;
+}
+
+// Call the PostPing API as the signed-in user.
+//
+// Server-only on purpose: the Clerk session token is attached here and must never reach the
+// browser bundle. Keeping every call server-side also means the browser never talks to the API
+// directly, so CORS never enters the picture.
+//
+// Note on caching: in Next 16 `fetch` is uncached by default, so per-user responses are not
+// shared between users. Do not add `use cache` to anything on this path.
+export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const { getToken } = await auth();
+  const token = await getToken();
+
+  if (!token) {
+    throw new ApiError(401, "Not signed in");
   }
-  
-  const url = `${API_BASE_URL}${path}`;
-  const response = await fetch(url, {
-    ...options,
-    headers,
+
+  const response = await fetch(`${API_BASE_URL}${API_V1_PREFIX}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      ...init?.headers,
+    },
   });
-  
-  if (response.status === 401 && token) {
-    // Session expired, logout user
-    useAuthStore.getState().logout();
-    if (typeof window !== 'undefined') {
-      window.location.href = '/login';
-    }
-    throw new Error('Session expired');
-  }
-  
+
   if (!response.ok) {
-    let errorDetail = 'API Request Failed';
-    try {
-      const errorJson = await response.json();
-      errorDetail = errorJson.detail || errorDetail;
-    } catch {
-      // ignore
-    }
-    throw new Error(errorDetail);
+    throw new ApiError(response.status, await errorMessage(response));
   }
-  
-  // For RedirectResponse or other non-json responses, handle appropriately
-  if (response.headers.get('content-type')?.includes('application/json')) {
-    return response.json() as Promise<T>;
+
+  // 204 No Content has no body to parse.
+  if (response.status === 204) {
+    return undefined as T;
   }
-  
-  return {} as Promise<T>;
+
+  return (await response.json()) as T;
 }

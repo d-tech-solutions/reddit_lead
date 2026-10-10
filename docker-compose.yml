@@ -1,0 +1,164 @@
+name: postping
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postping}
+    ports:
+      # 5433 on the host: 5432 is commonly taken by a locally-installed Postgres
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/001-pgvector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postping}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
+      BACKEND_CORS_ORIGINS: http://localhost:3000
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+      CLERK_AUTHORIZED_PARTIES: ${CLERK_AUTHORIZED_PARTIES:-http://localhost:3000}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_STANDARD: ${STRIPE_PRICE_STANDARD:-}
+      STRIPE_PRICE_PREMIUM: ${STRIPE_PRICE_PREMIUM:-}
+      STRIPE_PRICE_ENTERPRISE: ${STRIPE_PRICE_ENTERPRISE:-}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      # Used by "Send test" and Slack connect, which deliver from the API process.
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      NOTIFY_FROM_EMAIL: ${NOTIFY_FROM_EMAIL:-PostPing <onboarding@resend.dev>}
+      NOTIFY_ENCRYPTION_KEY: ${NOTIFY_ENCRYPTION_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:-}
+    volumes:
+      - ./backend/app:/app/app
+      # Dev-only helpers (seed_matches.py). Mounted rather than baked into the image so they never
+      # ship to production — see backend/scripts/.
+      - ./backend/scripts:/app/scripts
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker-ingest:
+    build:
+      context: ./backend
+    environment:
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postping}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
+      REDDIT_FETCH_MODE: ${REDDIT_FETCH_MODE:-rss}
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID:-}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET:-}
+      REDDIT_USER_AGENT: ${REDDIT_USER_AGENT:-postping/0.1}
+      REDDIT_POLL_INTERVAL_SECONDS: ${REDDIT_POLL_INTERVAL_SECONDS:-60}
+    volumes:
+      - ./backend/app:/app/app
+    command: python -m app.workers.ingest
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-match:
+    build:
+      context: ./backend
+    environment:
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postping}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      VERIFIER_MODEL: ${VERIFIER_MODEL:-gpt-4o-mini}
+      MATCH_BATCH_SIZE: ${MATCH_BATCH_SIZE:-15}
+      MATCH_BACKFILL_INTERVAL_MINUTES: ${MATCH_BACKFILL_INTERVAL_MINUTES:-5}
+      MATCH_BACKFILL_LIMIT: ${MATCH_BACKFILL_LIMIT:-200}
+    volumes:
+      - ./backend/app:/app/app
+    command: arq app.workers.match.WorkerSettings
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker-notify:
+    build:
+      context: ./backend
+    environment:
+      ENVIRONMENT: local
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-postping}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: INFO
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      NOTIFY_FROM_EMAIL: ${NOTIFY_FROM_EMAIL:-PostPing <onboarding@resend.dev>}
+      NOTIFY_ENCRYPTION_KEY: ${NOTIFY_ENCRYPTION_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      NOTIFY_MAX_ATTEMPTS: ${NOTIFY_MAX_ATTEMPTS:-4}
+      NOTIFY_BACKFILL_INTERVAL_MINUTES: ${NOTIFY_BACKFILL_INTERVAL_MINUTES:-5}
+      NOTIFY_BACKFILL_WINDOW_HOURS: ${NOTIFY_BACKFILL_WINDOW_HOURS:-6}
+    volumes:
+      - ./backend/app:/app/app
+    command: arq app.workers.notify.WorkerSettings
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./frontend/.env.local
+    environment:
+      # Container-to-container: `localhost` from inside this container is itself, not the api
+      # service, so this overrides the NEXT_PUBLIC_ fallback in lib/api.ts.
+      API_BASE_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
