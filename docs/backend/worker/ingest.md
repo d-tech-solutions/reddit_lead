@@ -26,7 +26,7 @@ than an Arq job, since it's the producer at the head of the pipeline, not a cons
 1. `get_active_subreddits()` (ingest.py:31-34) queries all `Watcher` rows with
    `status == "active"` and flattens their `subreddits` arrays into a deduplicated, sorted list.
    If no watchers are active, the cycle ends immediately.
-2. For each subreddit, it calls `source.fetch(subreddit, 50)` — pulling the 50 newest posts. A
+2. For each subreddit, it calls `source.fetch(subreddit, 10)` — pulling the 10 newest posts. A
    fetch failure for one subreddit is logged and skipped; it doesn't abort the whole cycle.
 3. `store_posts()` (ingest.py:37-51) bulk-inserts the fetched posts with
    `INSERT ... ON CONFLICT (reddit_post_id) DO NOTHING`, so posts already seen are silently

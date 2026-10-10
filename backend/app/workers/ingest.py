@@ -25,7 +25,7 @@ from app.workers.reddit_source import PostSource, build_source
 
 logger = logging.getLogger(__name__)
 
-POSTS_PER_FETCH = 50
+POSTS_PER_FETCH = 10
 
 
 async def get_active_subreddits(session: AsyncSession) -> list[str]:

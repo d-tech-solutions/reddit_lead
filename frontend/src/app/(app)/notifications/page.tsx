@@ -1,14 +1,19 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { NotificationsForm } from "@/components/notifications-form";
+import { SlackCard } from "@/components/slack-card";
+import { TelegramCard } from "@/components/telegram-card";
 import { ApiError, apiFetch } from "@/lib/api";
-import type { Settings } from "@/lib/types";
+import type { Me, Settings } from "@/lib/types";
 
 async function loadSettings(): Promise<
-  { ok: true; settings: Settings } | { ok: false; status: number | null; message: string }
+  { ok: true; settings: Settings; plan: string } | { ok: false; status: number | null; message: string }
 > {
   try {
-    const settings = await apiFetch<Settings>("/settings");
-    return { ok: true, settings };
+    const [settings, me] = await Promise.all([
+      apiFetch<Settings>("/settings"),
+      apiFetch<Me>("/me"),
+    ]);
+    return { ok: true, settings, plan: me.user.plan };
   } catch (error) {
     if (error instanceof ApiError) {
       return { ok: false, status: error.status, message: error.message };
@@ -49,7 +54,16 @@ export default async function NotificationsPage() {
           </CardContent>
         </Card>
       ) : (
-        <NotificationsForm settings={result.settings} />
+        <>
+          <NotificationsForm settings={result.settings} />
+          <SlackCard
+            channel={result.settings.channels.find((channel) => channel.channel_type === "slack")}
+          />
+          <TelegramCard
+            channel={result.settings.channels.find((channel) => channel.channel_type === "telegram")}
+            canUse={result.plan !== "free"}
+          />
+        </>
       )}
     </div>
   );

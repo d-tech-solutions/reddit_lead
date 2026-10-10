@@ -45,3 +45,17 @@ PAID_PLANS: tuple[str, ...] = tuple(plan for plan in TIER_LIMITS if plan != DEFA
 # Failing closed matters: a typo in a plan name should not silently grant unlimited watchers.
 def limits_for_plan(plan: str) -> TierLimit:
     return TIER_LIMITS.get(plan, TIER_LIMITS[DEFAULT_PLAN])
+
+
+# Notification channels only paid plans may use. Email and Slack are open to every plan.
+PAID_ONLY_CHANNELS: frozenset[str] = frozenset({"telegram"})
+
+
+def channel_allowed(plan: str, channel_type: str) -> bool:
+    """Whether a plan includes a notification channel.
+
+    Unknown plans count as free, same fail-closed stance as `limits_for_plan`.
+    """
+    if channel_type not in PAID_ONLY_CHANNELS:
+        return True
+    return plan in PAID_PLANS

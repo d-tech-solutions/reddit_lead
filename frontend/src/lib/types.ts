@@ -107,6 +107,8 @@ export interface NotificationChannel {
   channel_type: string;
   enabled: boolean;
   verified: boolean;
+  // A connect link was issued and is still waiting for the user to open it (Telegram).
+  link_pending: boolean;
 }
 
 export interface Settings {
@@ -131,4 +133,43 @@ export interface Billing {
   status: string | null;
   current_period_end: string | null;
   cancel_at_period_end: boolean;
+}
+
+// Mirrors backend/app/schemas/analytics.py. Rates are 0–1, or null when nothing was decided.
+export interface VerdictTotals {
+  confirmed: number;
+  rejected: number;
+  pending: number;
+  pass_rate: number | null;
+}
+
+export interface DailyCount {
+  // ISO date (YYYY-MM-DD), UTC.
+  day: string;
+  confirmed: number;
+}
+
+export interface SubredditStat {
+  subreddit: string;
+  confirmed: number;
+  reviewed: number;
+  pass_rate: number | null;
+}
+
+export interface WatcherStat {
+  id: string;
+  name: string;
+  status: WatcherStatus;
+  confirmed: number;
+  reviewed: number;
+  pass_rate: number | null;
+  last_match_at: string | null;
+}
+
+export interface Analytics {
+  days: number;
+  totals: VerdictTotals;
+  daily: DailyCount[];
+  top_subreddits: SubredditStat[];
+  watchers: WatcherStat[];
 }

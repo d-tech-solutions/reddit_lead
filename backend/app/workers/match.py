@@ -18,7 +18,7 @@ from typing import Any, ClassVar
 from uuid import UUID
 
 from arq import cron
-from arq.connections import RedisSettings
+from arq.connections import ArqRedis, RedisSettings
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -142,6 +142,31 @@ async def _verify_and_apply(
     return confirmed
 
 
+async def enqueue_notifications(
+    redis: ArqRedis | None, session: AsyncSession, post_id: UUID
+) -> None:
+    """Hand this post's confirmed, un-notified matches to the notify worker.
+
+    Best-effort: a failed enqueue is logged and left to the notify worker's own backfill sweep,
+    never allowed to fail the matching job.
+    """
+    if redis is None:
+        return
+    result = await session.execute(
+        select(Match.id).where(
+            Match.reddit_post_id == post_id,
+            Match.llm_verified.is_(True),
+            Match.notified_at.is_(None),
+        )
+    )
+    for match_id in result.scalars():
+        try:
+            # A job id derived from the match id makes a duplicate enqueue a no-op.
+            await redis.enqueue_job("notify_match", str(match_id), _job_id=f"notify_match:{match_id}")
+        except Exception:
+            logger.exception("match: failed enqueueing notify job for match %s", match_id)
+
+
 async def match_post(ctx: dict[str, Any], post_id: str) -> int:
     """Arq job: judge one post against every active watcher subscribed to its subreddit.
 
@@ -165,6 +190,9 @@ async def match_post(ctx: dict[str, Any], post_id: str) -> int:
         confirmed = 0
         for chunk in chunk_watchers(watchers, settings.MATCH_BATCH_SIZE):
             confirmed += await _verify_and_apply(session, verifier, post, chunk)
+
+        if confirmed:
+            await enqueue_notifications(ctx.get("redis"), session, post.id)
 
     return confirmed
 

@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, UniqueConstraint, func
@@ -40,3 +40,12 @@ class NotificationChannel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    @property
+    def link_pending(self) -> bool:
+        """True while a one-time connect link (Telegram) has been issued and has not expired."""
+        config = self.config or {}
+        expires = config.get("link_expires_at")
+        if not expires or not config.get("link_token_hash"):
+            return False
+        return datetime.fromisoformat(expires) > datetime.now(UTC)

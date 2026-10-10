@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from app.notifiers.slack import is_valid_webhook_url
+
 
 class NotificationChannelRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -11,6 +13,8 @@ class NotificationChannelRead(BaseModel):
     channel_type: str
     enabled: bool
     verified: bool
+    # A connect link was issued and is still waiting for the user to open it (Telegram).
+    link_pending: bool = False
 
 
 class SettingsRead(BaseModel):
@@ -36,3 +40,24 @@ class SettingsUpdate(BaseModel):
             return None
         stripped = value.strip()
         return stripped or None
+
+
+class SlackConnect(BaseModel):
+    webhook_url: str
+
+    @field_validator("webhook_url")
+    @classmethod
+    def _must_be_a_slack_webhook(cls, value: str) -> str:
+        stripped = value.strip()
+        if not is_valid_webhook_url(stripped):
+            raise ValueError("Must be a Slack incoming-webhook URL (https://hooks.slack.com/...)")
+        return stripped
+
+
+class ChannelUpdate(BaseModel):
+    enabled: bool
+
+
+class TelegramLinkRead(BaseModel):
+    url: str
+    expires_in_minutes: int

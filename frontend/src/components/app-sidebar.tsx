@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { UserButton } from "@clerk/nextjs";
 import {
+  BarChart3,
   Bell,
   BellRing,
   CreditCard,
@@ -24,6 +25,7 @@ import type { Usage } from "@/lib/types";
 const NAV_ITEMS = [
   { href: "/watchers", label: "Watchers", icon: LayoutGrid },
   { href: "/matches", label: "Matches", icon: Bell },
+  { href: "/analytics", label: "Analytics", icon: BarChart3 },
   { href: "/notifications", label: "Notifications", icon: BellRing },
   { href: "/billing", label: "Billing", icon: CreditCard },
   { href: "/settings", label: "Settings", icon: Settings },

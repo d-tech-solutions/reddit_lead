@@ -30,6 +30,33 @@ class Settings(BaseSettings):
     MATCH_BACKFILL_INTERVAL_MINUTES: int = 5
     MATCH_BACKFILL_LIMIT: int = 200
 
+    # Notification worker. Email goes out through Resend; with no key the email notifier is simply
+    # not registered, so matches stay un-notified (and the backfill sweep picks them up) rather than
+    # being marked failed. Resend's test sender only delivers to the account owner's own address —
+    # real users need a verified sending domain in NOTIFY_FROM_EMAIL.
+    RESEND_API_KEY: str = ""
+    NOTIFY_FROM_EMAIL: str = "PostPing <onboarding@resend.dev>"
+    # Fernet key for secrets stored in the DB (Slack webhook URLs). Generate one with:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    NOTIFY_ENCRYPTION_KEY: str = ""
+    # Telegram. Create a bot with @BotFather for the token and username. The webhook secret is any
+    # random string of letters, digits, `_` and `-`; Telegram echoes it back in a header so the
+    # webhook endpoint can tell its calls from anyone else's. Point Telegram at the endpoint with
+    # `python -m scripts.set_telegram_webhook https://<public-host>`.
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_BOT_USERNAME: str = ""
+    TELEGRAM_WEBHOOK_SECRET: str = ""
+    # How long a "Connect Telegram" link stays valid.
+    TELEGRAM_LINK_TTL_MINUTES: int = 15
+    # Temporary failures (timeouts, 429, 5xx) are retried this many times before the delivery is
+    # marked failed.
+    NOTIFY_MAX_ATTEMPTS: int = 4
+    NOTIFY_BACKFILL_INTERVAL_MINUTES: int = 5
+    # The sweep only looks at matches confirmed this recently, so connecting a channel next week
+    # doesn't replay old matches.
+    NOTIFY_BACKFILL_WINDOW_HOURS: int = 6
+    NOTIFY_BACKFILL_LIMIT: int = 200
+
     # Auth (Clerk)
     CLERK_SECRET_KEY: str = ""
     # Comma-separated frontend origins allowed to mint tokens for this API. Leaving this empty

@@ -3,7 +3,6 @@
 import { useActionState } from "react";
 
 import { updateSettingsAction, type ActionState } from "@/app/actions/settings";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -50,12 +49,6 @@ export function NotificationsForm({ settings }: { settings: Settings }) {
               disabled={pending}
             />
             <span className="text-sm text-muted-foreground">Email notifications</span>
-          </div>
-
-          <div className="flex items-center gap-2 opacity-60">
-            <Switch disabled />
-            <span className="text-sm text-muted-foreground">Telegram notifications</span>
-            <Badge variant="outline">Coming soon</Badge>
           </div>
 
           {state.error ? (
